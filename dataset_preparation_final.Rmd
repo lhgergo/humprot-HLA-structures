@@ -1,0 +1,2503 @@
+---
+title: Final code that for generating the results outlined in the dataset descriptor
+  article
+author: "Gergő Mihály Balogh"
+date: "2026-09-08"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+This Rmd document contains most pieces of code required to reproduce the results, outlined in the article Predicted structure of the self-immunopeptidome across globally common HLA-I alleles by Balogh et al.
+
+# Loading libraries, functions and common data
+```{r}
+library(protr)
+library(magrittr)
+library(purrr)
+library(furrr)
+library(tictoc)
+library(dplyr)
+library(seqinr)
+library(fastmatch)
+library(bio3d)
+library(tidyr)
+library(png)
+library(grid)
+library(ggplot2)
+library(ggpubr)
+library(cowplot)
+library(JuliaCall)
+library(universalmotif) # install using BiocManager::install("universalmotif")
+library(lsa)
+library(emhace.tools) # install using devtools::install_github("immunoteam/emhace.tools")
+library(immunoinfo.tools) # install using devtools::install_github("immunoteam/immunoinfo.tools")
+julia_source("functions_humprotpred.jl")
+dir.create("data/dataset_preparation_1/")
+
+aas_unq <- protr::AABLOSUM62 %>% rownames
+
+source("functions.R")
+```
+
+# Creating all nonamer frames from the human proteome
+```{r}
+proteome <- seqinr::read.fasta("data/dataset_preparation_1/uniprotkb_proteome_UP000005640_AND_revi_2025_11_05.fasta.gz", seqtype = "AA")
+proteome <- proteome[map_dbl(proteome, length) >= 9]
+peps_list <- proteome %>% map(emhace.tools::GenerateXmers, 9, string_input = FALSE, .progress = TRUE)
+peps_unq <- unlist(peps_list, use.names = F) %>% unique
+length(peps_unq[!grepl("U", peps_unq)]) # n = 10,304,967
+save(peps_unq, file = "data/dataset_preparation_1/peps_unq_all_9mers.RData")
+save(peps_list, file = "data/dataset_preparation_1/peps_list_9mers.RData")
+```
+
+# Performing binding predictions to the three alleles
+```{r}
+load("data/dataset_preparation_1/peps_unq_all_9mers.RData")
+
+# A0201 ----------
+bvalsdf <- emhace.tools::RunNetMHCpan_ng(alleles = "HLA-A02:01",
+                                         peptides = peps_unq,
+                                         output_format = "long",
+                                         threads = 100,
+                                         version_number = "4.1",
+                                         result_files_location = paste0("/media/workstation/Gergo_Disk/Gergo/witchsbrew/data/humprot_pred_1/results/", "/home/workstation/results_humprot/", crnt_allele_simple, "/"),
+                                         software_path = "/home/workstation/Programok/netMHCpan-4.1/netMHCpan")
+save(bvalsdf, file = "data/dataset_preparation_1/bvalsdfs/bvalsdf_A0201_uniprotkb_proteome_UP000005640_AND_revi_2025_11_05.RData")
+
+# A2402 ----------
+bvalsdf <- emhace.tools::RunNetMHCpan_ng(alleles = "HLA-A24:02",
+                                         peptides = peps_unq,
+                                         output_format = "long",
+                                         threads = 100,
+                                         version_number = "4.1",
+                                         result_files_location = paste0("/media/workstation/Gergo_Disk/Gergo/witchsbrew/data/humprot_pred_1/results/", "/home/workstation/results_humprot/", crnt_allele_simple, "/"),
+                                         software_path = "/home/workstation/Programok/netMHCpan-4.1/netMHCpan")
+save(bvalsdf, file = "data/dataset_preparation_1/bvalsdfs/bvalsdf_A2402_uniprotkb_proteome_UP000005640_AND_revi_2025_11_05.RData")
+
+# C0401 ----------
+bvalsdf <- emhace.tools::RunNetMHCpan_ng(alleles = "HLA-C04:01",
+                                         peptides = peps_unq,
+                                         output_format = "long",
+                                         threads = 100,
+                                         version_number = "4.1",
+                                         result_files_location = paste0("/media/workstation/Gergo_Disk/Gergo/witchsbrew/data/humprot_pred_1/results/", "/home/workstation/results_humprot/", crnt_allele_simple, "/"),
+                                         software_path = "/home/workstation/Programok/netMHCpan-4.1/netMHCpan")
+save(bvalsdf, file = "data/dataset_preparation_1/bvalsdfs/bvalsdf_C0401_uniprotkb_proteome_UP000005640_AND_revi_2025_11_05.RData")
+```
+
+# ANALYSIS: Collecting the descriptive statistics about the HLA-binding properties of the nonamer frames from the human proteome
+In the first code chunk I will assess the distribution of predicted binding values (Rank EL scores) for the peptides as histograms:
+
+```{r}
+bvalsdfs_all <- list(loadIn("data/dataset_preparation_1/bvalsdfs/bvalsdf_A0201_uniprotkb_proteome_UP000005640_AND_revi_2025_11_05.RData")[[1]],
+                     loadIn("data/dataset_preparation_1/bvalsdfs/bvalsdf_A2402_uniprotkb_proteome_UP000005640_AND_revi_2025_11_05.RData")[[1]],
+                     loadIn("data/dataset_preparation_1/bvalsdfs/bvalsdf_C0401_uniprotkb_proteome_UP000005640_AND_revi_2025_11_05.RData")[[1]]) %>%
+  do.call(rbind, .)
+
+bvalsdfs_all %<>% mutate(allele = paste0(substr(allele, 1, 5), "*", substr(allele, 6, nchar(allele))))
+
+aggrdf <- bvalsdfs_all %>% 
+  group_by(allele) %>% 
+  summarise(n_SB = sum(Rank_EL < 0.5),
+            n_WB = sum(Rank_EL < 2),
+            perc_SB = mean(Rank_EL < 0.5)*100,
+            perc_ALWB = mean(Rank_EL < 2)*100)
+
+alleles_unq <- bvalsdfs_all$allele %>% unique %>% sort
+
+pltslist_hist <- map(alleles_unq, \(crnt_allele) {
+  bvalsdfs_all %>% 
+    filter(allele == crnt_allele) %>% 
+    ggplot() +
+    geom_histogram(aes(x = Rank_EL), fill = "white", color = "black") +
+    geom_vline(xintercept = 0.5, color = "red", linetype = "dashed") +
+    geom_vline(xintercept = 2, color = "blue", linetype = "dashed") +
+    scale_x_continuous(trans = scales::pseudo_log_trans(base = 10),
+                       breaks = c(0, 0.5, 2, 10, 50, 100),
+                       labels = function(x) ifelse(x == 0, "0", as.character(x))) +
+    scale_y_continuous(labels = function(x) parse(text = expSup(x, digits = 1)),
+                       limits = c(0, 1.2e06), breaks = c(0, 3e05, 6e05, 9e05, 12e05)) +
+    xlab("Eluted ligand percentile rank") + ylab("Number of peptides") +
+    ggtitle(label = crnt_allele) +
+    theme_classic()
+})
+```
+
+In the next code chunk, I will create sequence logos for the SB peptides of the three alleles from the human proteome:
+```{r}
+# collecting SB peptides from the human proteome for the three alleles ----------
+peps_sb_per_alleles <- bvalsdfs_all %>%
+  filter(Rank_EL < 0.5) %>%
+  dplyr::select(allele, peptide) %>% 
+  unique
+
+peps_sb_per_alleles <- map(alleles_unq, ~peps_sb_per_alleles %>% filter(allele == .x) %>% pull(peptide)) %>% set_names(alleles_unq)
+
+# # creating a "background" matrix with position-specific amino acid frequencies -----------
+# load("data/dataset_preparation_1/peps_list_9mers.RData")
+# peps_all <- peps_list %>% unlist(use.names = FALSE)
+# freqsmtx_cnt <- map(1:9, ~peps_all %>%
+#                       substr(.x, .x) %>%
+#                       Rfast::Table(.) %>%
+#                       magrittr::extract(aas_unq)) %>% do.call(cbind, .)
+# 
+# freqsmtx_rel <- apply(freqsmtx_cnt, 2, \(x) x / sum(x))
+# save(freqsmtx_rel, file = "data/dataset_preparation_1/freqsmtx_aa_rel.RData")
+
+# assembling the sequence logos -----------
+load("data/dataset_preparation_1/freqsmtx_aa_rel.RData")
+motobjs_list <- map(peps_sb_per_alleles, ~create_motif(.x, alphabet = "AA", type = "ICM", pseudocount = 1, bkg = rowMeans(freqsmtx_rel)))
+
+plts_motif <- imap(motobjs_list, ~view_motifs(.x, use.type = "ICM",
+                                show.names = T, min.height = 0, y.spacer = 0.001) +
+       ylim(c(0,2.75)) +
+       theme_classic() +
+       theme(legend.position = "none") +
+       xlab("Amino acid position") +
+       ylab("Bits") +
+       ggtitle(label = " "))
+```
+
+In the next code chunk I will quantify the cosine similarity between the logo based on the human proteome vs. the one created from the peptides of the MHC Motif Atlas (downloaded on 6th May 2026). Note: run the previous code chunk first!
+```{r}
+load("data/dataset_preparation_1/freqsmtx_aa_rel.RData")
+
+# creating the motif objects ----------
+motobjs_list_mhcatlas <- map(alleles_unq, \(crnt_allele) {
+  crnt_allele_simple <- crnt_allele %>% gsub("HLA-", "", .) %>% gsub("\\*", "", .) %>% gsub("\\:", "", .)
+  peps_mhcatlas <- read.delim("data/dataset_preparation_1/data_classI_MS_Peptides_all_peptides.txt") %>% 
+    filter(Allele == crnt_allele_simple, nchar(Peptide) == 9) %>%
+    pull(Peptide)
+  
+  mot_mhcatlas = create_motif(peps_mhcatlas, alphabet = "AA", type = "ICM", pseudocount = 1, bkg = rowMeans(freqsmtx_rel))
+  return(mot_mhcatlas)
+})
+
+# calculating cosine values ----------
+imap_dbl(motobjs_list_mhcatlas, \(crnt_mot = .x, crnt_allele = .y) {
+  cosine(as.numeric(as.matrix(crnt_mot@motif)),
+         as.numeric(as.matrix(motobjs_list[[crnt_allele]]@motif)))
+})
+```
+
+Assembling the final plot:
+```{r}
+png("data/dataset_preparation_1/fig2.png", width = 159.2, height = 200, units = "mm", res = 300)
+cowplot::plot_grid(cowplot::plot_grid(plotlist = pltslist_hist, ncol = 1),
+                   cowplot::plot_grid(plotlist = plts_motif, ncol = 1), nrow = 1, labels = c("A", "B"), rel_widths = c(0.6, 0.4))
+dev.off()
+```
+
+# Creating MHC-fine input CSV files for structural predictions
+For A0201:
+
+```{r}
+# collecting peptides --------
+load("data/dataset_preparation_1/bvalsdf_A0201_uniprotkb_proteome_UP000005640_AND_revi_2025_11_05.RData")
+peps_unq <- bvalsdf %>% 
+  filter(Rank_EL < 0.5) %>% 
+  pull(peptide)
+
+# preparing input file for MHC-fine ----------
+A0201_seq = "GSHSMRYFFTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEGPEYWDGETRKVKAHSQTHRVDLGTLRGYYNQSEAGSHTVQRMYGCDVGSDWRFLRGYHQYAYDGKDYIALKEDLRSWTAADMAAQTTKHKWEAAHVAEQLRAYLEGTCVEWLRRYLENGKETLQRT"
+
+inputdf <- data.frame(unique_id = paste0("A0201.", peps_unq),
+                      protein_sequence = A0201_seq,
+                      peptide_sequence = peps_unq)
+
+write.csv(inputdf, file = "data/dataset_preparation_1/mhcfine_input_humprot_A0201_SB.csv", quote = FALSE, row.names = FALSE)
+```
+
+For A2402 and C0401:
+```{r}
+# collecting pHLAs for prediction ----------
+bvalsdfs_list <- list.files("data/dataset_preparation_1/bvalsdfs/", full.names = TRUE) %>% extract(!grepl("A0201", .)) %>% map(~loadIn(.x)[[1]])
+bvalsdfs_list %>% map_dbl(nrow)
+bvalsdfs_list %<>% map(~.x %>% filter(Rank_EL < 0.5))
+names(bvalsdfs_list) <- map_chr(bvalsdfs_list, ~.x$allele %>% head(1)) %>%
+  gsub("HLA-", "", .) %>%
+  gsub("\\:", "", .)
+
+# collecting HLA seqs -----------
+A0201_seq = "GSHSMRYFFTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEGPEYWDGETRKVKAHSQTHRVDLGTLRGYYNQSEAGSHTVQRMYGCDVGSDWRFLRGYHQYAYDGKDYIALKEDLRSWTAADMAAQTTKHKWEAAHVAEQLRAYLEGTCVEWLRRYLENGKETLQRT"
+hlaI_protseqs <- c(Biostrings::readAAStringSet("data/HLA_prot/A_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/B_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/C_prot.fasta"))
+
+names(hlaI_protseqs) %<>% strsplit(" ") %>% map_chr(~.x[2])
+hlaI_protseq_names_short <- names(hlaI_protseqs) %>% strsplit("\\:") %>% map_chr(~.x[1:2] %>% paste0(collapse = ":"))
+alleles_unq <- c("A*02:01", "A*24:02", "C*04:01")
+hlaI_protseqs <- hlaI_protseqs[fmatch(alleles_unq, hlaI_protseq_names_short)]
+names(hlaI_protseqs) <- alleles_unq %>% gsub("\\*", "", .) %>% gsub("\\:", "", .)
+
+hla_seqs_ready <- map(hlaI_protseqs, \(crnt_seq) {
+  algnmnt <- pwalign::pairwiseAlignment(A0201_seq, crnt_seq)
+  algnmntdf <- data.frame(A0201 = algnmnt@pattern %>% as.character() %>% strsplit("") %>% unlist(use.names = F),
+                          other_allele = algnmnt@subject %>% as.character() %>% strsplit("") %>% unlist(use.names = F))
+  ix_hyphens <- which(algnmntdf$other_allele == "-")
+
+  if(length(ix_hyphens) > 0) {
+    other_seq <- algnmntdf$other_allele[1:(min(ix_hyphens)-1)] %>% paste0(collapse = "")
+  } else {
+    other_seq <- algnmntdf$other_allele
+  }
+
+  return(other_seq)
+}, .progress = TRUE)
+
+hla_seqs_ready %<>% map_chr(paste0, collapse = "")
+
+inputdf <- bvalsdfs_list %>% map(~.x %>% dplyr::select(allele, peptide)) %>% do.call(rbind, .) %>% 
+  mutate(allele = allele %>% gsub("HLA-", "", .) %>% gsub("\\:", "", .)) %>% 
+    set_rownames(NULL)
+
+inputdf %<>% 
+  mutate(unique_id = paste0(allele, ".", peptide),
+         protein_sequence = hla_seqs_ready[allele],
+         peptide_sequence = peptide) %>% 
+  dplyr::select(-allele, -peptide)
+
+inputdf_a2402 <- inputdf %>% filter(grepl("A2402", unique_id))
+inputdf_c0401 <- inputdf %>% filter(grepl("C0401", unique_id))
+
+write.csv(inputdf_a2402, file = "data/dataset_preparation_1/mhcfine_input_humprot_A2402_SB.csv", quote = FALSE, row.names = FALSE)
+write.csv(inputdf_c0401, file = "data/dataset_preparation_1/mhcfine_input_humprot_C0401_SB.csv", quote = FALSE, row.names = FALSE) # ezt lecsekkolni egyezik-e azzal, amit futtattam eddig!
+```
+
+# Performing MHC-fine predictions
+Use the `run_mhcfine.py` Python script. The directory containing the output PDB files should be named `mhcfine_output_humprot_A0201_SB` (used in the code chunks below).
+
+Checking how % of the predictions done:
+```{r}
+# loading input files, collecting predicted PDBs ----------
+inputdf_a0201 <- read.csv("data/dataset_preparation_1/mhcfine_input_humprot_A0201_SB.csv")
+inputdf_a2402 <- read.csv("data/dataset_preparation_1/mhcfine_input_humprot_A2402_SB.csv")
+inputdf_c0401 <- read.csv("data/dataset_preparation_1/mhcfine_input_humprot_C0401_SB.csv")
+
+pdbs_ready_a0201 <- list.files("data/dataset_preparation_1/mhcfine_output_humprot_A0201_SB/") %>% gsub("\\.pdb", "", .)
+pdbs_ready_a2402 <- list.files("data/dataset_preparation_1/mhcfine_output_humprot_A2402_SB/") %>% gsub("\\.pdb", "", .)
+pdbs_ready_c0401 <- list.files("data/dataset_preparation_1/mhcfine_output_humprot_C0401_SB/") %>% gsub("\\.pdb", "", .)
+
+# checking the missing ones ---------
+setdiff(inputdf_a0201$unique_id, pdbs_ready_a0201) # OK!
+setdiff(inputdf_a2402$unique_id, pdbs_ready_a2402) # OK!
+```
+
+# ANALYSIS: Inspecting the pLDDT values
+```{r}
+# pdb_paths <- c(list.files("data/dataset_preparation_1/mhcfine_output_humprot_A0201_SB/", full.names = TRUE),
+#                list.files("data/dataset_preparation_1/mhcfine_output_humprot_A2402_SB/", full.names = TRUE),
+#                list.files("data/dataset_preparation_1/mhcfine_output_humprot_C0401_SB/", full.names = TRUE))
+# 
+# pdb_files <- pdb_paths %>% strsplit("\\/") %>% map_chr(tail, 1)
+# 
+# # extracting the per-residue pLDDT scores for the nonamer peptides ---------
+# plan("multisession", workers = 30)
+# tic()
+# plddtdf_pep <- future_map(pdb_paths, \(crnt_pdb_path) {
+#   readLines(crnt_pdb_path) %>%
+#     magrittr::extract(-1) %>%
+#     read.delim(text = ., sep = "", header = FALSE) %>%
+#     filter(V1 == "ATOM", V5 == "B") %>%
+#     dplyr::select(V1, V4, V11) %>%
+#     set_colnames(c("atom", "aa", "b")) %>%
+#     unique %>%
+#     pull(b)
+# }, .progress = TRUE) %>% do.call(rbind, .) %>% set_colnames(1:9)
+# toc()
+# rownames(plddtdf_pep) <- pdb_files
+# 
+# save(plddtdf_pep, file = "data/dataset_preparation_1/plddtdf_pep.RData")
+
+# # collecting all the pLDDT scores from all the structures ----------
+# plan("multisession", workers = 30)
+# tic()
+# plddtdfs_list <- future_map(pdb_paths, \(crnt_pdb_path) {
+#   tmpdf <- readLines(crnt_pdb_path) %>%
+#     magrittr::extract(-1) %>%
+#     read.delim(text = ., sep = "", header = FALSE) %>%
+#     dplyr::select(V1, V4, V5, V6, V11) %>%
+#     filter(V1 == "ATOM") %>%
+#     set_colnames(c("atom", "aa", "chain", "pos", "b")) %>%
+#     unique %>%
+#     dplyr::select(-atom)
+# 
+#   return(tmpdf)
+# }, .progress = TRUE) %>% set_names(pdb_files)
+# toc()
+# 
+# save(plddtdfs_list, file = "data/dataset_preparation_1/plddtdfs_list.RData")
+
+# # collecting all the pLDDT scores from all the structures in a data frame ----------
+# load("data/dataset_preparation_1/plddtdfs_list.RData")
+# 
+# plddtdfs_all <- plddtdfs_list %>%
+#   do.call(rbind, .) %>%
+#   mutate(chain_name = case_when(chain == "A" ~ "HLA",
+#                                 chain == "B" ~ "Peptide chain"))
+# 
+# plddtdfs_all %<>%
+#   mutate(allele = substr(rownames(plddtdfs_all), 1, 5), .before = 1) %>%
+#   mutate(peptide = substr(rownames(plddtdfs_all), 7, 15))
+# 
+# rownames(plddtdfs_all) <- NULL
+# 
+# save(plddtdfs_all, file = "data/dataset_preparation_1/plddtdfs_all.RData")
+# 
+# # calculating the average/min pLDDT scores for the "HLA" and "peptide" chains separately ----------
+# tic()
+# plddtdf_aggr <- map_df(plddtdfs_list, \(tmpdf) {
+#   c(aggregate(b ~ chain, data = tmpdf, FUN = mean) %>%
+#       SimplifyAggr() %>%
+#       set_names(paste0("mean_", names(.))),
+#     aggregate(b ~ chain, data = tmpdf, FUN = median) %>%
+#       SimplifyAggr() %>%
+#       set_names(paste0("median_", names(.))),
+#     aggregate(b ~ chain, data = tmpdf, FUN = min) %>%
+#       SimplifyAggr() %>%
+#       set_names(paste0("min_", names(.))))
+# }, .progress = TRUE) %>%
+#   mutate(pdb_files, .before = 1)
+# toc()
+# 
+# save(plddtdf_aggr, file = "data/dataset_preparation_1/plddtdf_aggr.RData")
+```
+
+```{r}
+# position-based results ----------
+load("data/dataset_preparation_1/plddtdf_pep.RData")
+plddtdf_pep_long <- plddtdf_pep %>%
+  reshape2::melt() %>%
+  set_colnames(c("pdbfile", "pos", "value")) %>% 
+  mutate(allele = pdbfile %>% substr(1, 5)) %>% 
+  dplyr::select(-pdbfile) %>% 
+  mutate(allele = paste0("HLA-", substr(allele, 1, 1), "*", substr(allele, 2, 3), ":", substr(allele, 4, 5)))
+
+plddtdf_pep_long %>% 
+  group_by(allele, pos) %>% 
+  summarise(median_plddt = median(value),
+            perc_under_70 = mean(value < 70)*100)
+
+plt_bplt_plddt_perpos <- plddtdf_pep_long %>% 
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(pos), y = value)) +
+  facet_wrap(~allele) +
+  geom_hline(yintercept = 90, color = "red", linetype = "dashed") +
+  geom_hline(yintercept = 70, color = "blue", linetype = "dashed") +
+  theme_classic() +
+  xlab("Amino acid position") +
+  ylab("pLDDT value")
+
+png("data/dataset_preparation_1/fig_bplt_plddt_perpos.png", width = 159.2, height = 100, units = "mm", res = 300)
+plt_bplt_plddt_perpos
+dev.off()
+
+# overall results ----------
+load("data/dataset_preparation_1/plddtdfs_all.RData")
+plt_overall <- ggplot(plddtdfs_all) +
+  geom_boxplot(aes(x  = allele, y = b)) +
+  geom_hline(yintercept = 90, color = "red", linetype = "dashed") +
+  geom_hline(yintercept = 70, color = "blue", linetype = "dashed") +
+  facet_wrap(~chain_name, ncol = 1) +
+  xlab("HLA allele") +
+  ylab("pLDDT value") +
+  theme_classic()
+
+plddtdfs_all %>% 
+  group_by(chain, allele) %>% 
+  summarise(n_residues = length(b),
+            mean_plddt = mean(b),
+            median_plddt = median(b),
+            perc_under_70 = mean(b < 70)*100)
+
+# aggregated results -----------
+load("data/dataset_preparation_1/plddtdf_aggr.RData")
+plt_mean <- plddtdf_aggr %>% 
+  mutate(allele = substr(pdb_files, 1, 5),
+         peptide = substr(pdb_files, 7, 15)) %>% 
+  dplyr::select(mean_A, mean_B, allele) %>% 
+  set_colnames(c("HLA", "Peptide chain", "allele")) %>% 
+  reshape2::melt() %>% 
+  ggplot() +
+  geom_boxplot(aes(x  = allele, y = value)) +
+  facet_wrap(~variable, ncol = 1) +
+  geom_hline(yintercept = 90, color = "red", linetype = "dashed") +
+  geom_hline(yintercept = 70, color = "blue", linetype = "dashed") +
+  xlab("HLA allele") +
+  ylab("Mean pLDDT value") +
+  theme_classic()
+
+plt_median <- plddtdf_aggr %>% 
+  mutate(allele = substr(pdb_files, 1, 5),
+         peptide = substr(pdb_files, 7, 15)) %>% 
+  dplyr::select(median_A, median_B, allele) %>% 
+  set_colnames(c("HLA", "Peptide chain", "allele")) %>% 
+  reshape2::melt() %>% 
+  ggplot() +
+  geom_boxplot(aes(x  = allele, y = value)) +
+  facet_wrap(~variable, ncol = 1) +
+  geom_hline(yintercept = 90, color = "red", linetype = "dashed") +
+  geom_hline(yintercept = 70, color = "blue", linetype = "dashed") +
+  xlab("HLA allele") +
+  ylab("Median pLDDT value") +
+  theme_classic()
+  
+plt_ready_bplot <- cowplot::plot_grid(plt_overall, plt_mean, plt_median,
+                                     nrow = 1, labels = c("A", "B", "C"))
+
+png("data/dataset_preparation_1/fig_bplot_plddt.png", width = 159.2, height = 140, units = "mm", res = 300)
+plt_ready_bplot
+dev.off()
+```
+
+# Overall structure alignment for human complexes
+## Performing alignment
+Here, I will perform the "prefitting" step of the predicted pHLA structures based on the HLA alpha domains (chain A) from the PDB files.
+
+For A0201, I selected A0201.GMTERHWEA.pdb as the reference due to its high pLDDT scores (mean_A pLDDT values of 98.3 and min_A of 89.2).
+
+```{r}
+# marking the input and output directories ----------
+pdbobjs_dir_path <- "data/dataset_preparation_1/mhcfine_output_humprot_A0201_SB/"
+pdbobjs_outdir_path = "data/dataset_preparation_1/mhcfine_output_humprot_A0201_SB_prefitted/"
+dir.create(pdbobjs_outdir_path)
+
+# selecting the reference structure based on the average confidence of the 3D structure ----------
+load("data/dataset_preparation_1/plddtdf_aggr.RData")
+plddtdf_aggr %<>% mutate(allele = substr(pdb_files, 1, 5))
+plddtdf_aggr %<>% filter(allele == "A0201")
+plddtdf_aggr %>% arrange(by = desc(mean_A)) %>% head(10)
+plddtdf_aggr %>% arrange(by = desc(mean_A)) %>% head(10)
+crnt_refpep <- "A0201.GMTERHWEA.pdb"
+
+flnms_vec <- list.files(pdbobjs_dir_path)
+flnms_vec <- setdiff(flnms_vec, list.files(pdbobjs_outdir_path))
+
+plan("multisession", workers = 10)
+tic()
+future_walk(flnms_vec, ~pymol.align(pdbpath_ref = paste0(pdbobjs_dir_path, crnt_refpep),
+                                    pdbpath_target = paste0(pdbobjs_dir_path, .x),
+                                    outpath = paste0(pdbobjs_outdir_path, .x)), .progress = TRUE)
+toc()
+```
+
+For A2402, I selected A2402.PYTRFIHDW.pdb as the reference due to its high pLDDT scores (mean_A: 97.92824, min_A: 89.3).
+```{r}
+# marking the input and output directories ----------
+pdbobjs_dir_path <- "data/dataset_preparation_1/mhcfine_output_humprot_A2402_SB/"
+pdbobjs_outdir_path = "data/dataset_preparation_1/mhcfine_output_humprot_A2402_SB_prefitted/"
+dir.create(pdbobjs_outdir_path)
+
+# selecting the reference structure based on the average confidence of the 3D structure ----------
+load("data/dataset_preparation_1/plddtdf_aggr.RData")
+plddtdf_aggr %<>% mutate(allele = substr(pdb_files, 1, 5))
+plddtdf_aggr %<>% filter(allele == "A2402")
+plddtdf_aggr %>% arrange(by = desc(mean_A)) %>% head(10)
+plddtdf_aggr %>% arrange(by = desc(mean_A)) %>% head(10)
+crnt_refpep <- plddtdf_aggr %>% filter(mean_A == max(mean_A)) %>% pull(pdb_files)
+
+flnms_vec <- list.files(pdbobjs_dir_path)
+
+plan("multisession", workers = 10)
+tic()
+future_walk(flnms_vec, ~pymol.align(pdbpath_ref = paste0(pdbobjs_dir_path, crnt_refpep),
+                                    pdbpath_target = paste0(pdbobjs_dir_path, .x),
+                                    outpath = paste0(pdbobjs_outdir_path, .x)), .progress = TRUE)
+toc()
+```
+
+For C0401, I selected C0401.TTDYKGTLL.pdb as the reference due to its high pLDDT scores (mean_A: 96.9, min_A: 80.3).
+```{r}
+# marking the input and output directories ----------
+pdbobjs_dir_path <- "data/dataset_preparation_1/mhcfine_output_humprot_C0401_SB/"
+pdbobjs_outdir_path = "data/dataset_preparation_1/mhcfine_output_humprot_C0401_SB_prefitted/"
+dir.create(pdbobjs_outdir_path)
+
+# selecting the reference structure based on the average confidence of the 3D structure ----------
+load("data/dataset_preparation_1/plddtdf_aggr.RData")
+plddtdf_aggr %<>% mutate(allele = substr(pdb_files, 1, 5))
+plddtdf_aggr %<>% filter(allele == "C0401")
+plddtdf_aggr %>% arrange(by = desc(mean_A)) %>% head(10)
+plddtdf_aggr %>% arrange(by = desc(mean_A)) %>% head(10)
+crnt_refpep <- "C0401.TTDYKGTLL.pdb" # hard coded as it was chosen both based on mean and min A
+
+flnms_vec <- list.files(pdbobjs_dir_path)
+
+plan("multisession", workers = 10)
+tic()
+future_walk(flnms_vec, ~pymol.align(pdbpath_ref = paste0(pdbobjs_dir_path, crnt_refpep),
+                                    pdbpath_target = paste0(pdbobjs_dir_path, .x),
+                                    outpath = paste0(pdbobjs_outdir_path, .x)), .progress = TRUE)
+toc()
+```
+
+## Testing alignment success
+```{r}
+alleles_unq <- c("A0201", "A2402", "C0401")
+pltlist <- map(alleles_unq, \(crnt_allele) {
+  pdbobjs_dir_path <- paste0("data/dataset_preparation_1/mhcfine_output_humprot_", crnt_allele, "_SB/")
+  set.seed(1234)
+  chosen_files_nonaligned <- list.files(pdbobjs_dir_path, full.names = T) %>% sample(100)
+  chosen_files_aligned <- chosen_files_nonaligned %>% gsub("SB", "SB_prefitted", .)
+  
+  rmsddf <- data.frame(rmsd_ca_nonaligned = map_dbl(chosen_files_nonaligned,
+                                                    ~RMSD.pdb(x = .x, y = chosen_files_nonaligned[1],
+                                                              elety = "CA", fit = FALSE, chain_x = "A", chain_y = "A"),
+                                                    .progress = T),
+                       rmsd_ca_aligned = map_dbl(chosen_files_aligned,
+                                                 ~RMSD.pdb(x = .x, y = chosen_files_aligned[1],
+                                                           elety = "CA", fit = FALSE, chain_x = "A", chain_y = "A"),
+                                                 .progress = T))
+  
+  ggpaired(data = rmsddf, cond1 = "rmsd_ca_nonaligned", cond2 = "rmsd_ca_aligned") +
+    stat_compare_means(paired = TRUE) +
+    scale_y_log10()+
+    ggtitle(label = crnt_allele)
+})
+
+cowplot::plot_grid(plotlist = pltlist, nrow = 1)
+```
+
+The randomly chosen pairs of non-aligned and aligned PDB files indicate that alignment was performed correctly, and indeed increased the fit between the predicted structures.
+
+# Creating a catalogue of structure files
+```{r}
+catdf <- data.frame(pdb_path_nonaligned = c("data/dataset_preparation_1/mhcfine_output_humprot_A0201_SB/",
+                                            "data/dataset_preparation_1/mhcfine_output_humprot_A2402_SB/",
+                                            "data/dataset_preparation_1/mhcfine_output_humprot_C0401_SB/") %>% 
+                      list.files(full.names = TRUE)) %>% 
+  mutate(pdb_path_aligned = pdb_path_nonaligned %>% gsub("_SB", "_SB_prefitted", .)) %>% 
+  mutate(allele = basename(pdb_path_nonaligned) %>% strsplit("\\.") %>% map_chr(~.x[1]),
+         peptide = basename(pdb_path_nonaligned) %>% strsplit("\\.") %>% map_chr(~.x[2]), .before = 1)
+
+catdf %<>% 
+  mutate(pdb_path_aligned = pdb_path_aligned %>%
+           gsub("mhcfine_output", "predicted_structures", .) %>%
+           gsub("data/dataset_preparation_1/", "", .) %>% 
+           gsub("\\/\\/", "/", .),
+         pdb_path_nonaligned = pdb_path_nonaligned %>%
+           gsub("mhcfine_output", "predicted_structures", .) %>%
+           gsub("data/dataset_preparation_1/", "", .) %>% 
+           gsub("\\/\\/", "/", .))
+
+write.csv(catdf, file = "data/dataset_preparation_1/file_catalogue.csv", quote = FALSE, row.names = FALSE)
+```
+
+
+# Preparing the benchmarking of MHC-fine on experimental pHLA structures
+## Collecting PDB identifiers
+Sources of PDB identifiers to be used: HLA3DB (as of 3rd July 2026), Histo.fyi (as of 26th November 2025).
+
+```{r}
+# # downloading a new version of the 
+# htmlobj <- rvest::read_html("https://hla3db.research.chop.edu/Query/?PDB_ID=&BB_Conf=&Allele=&Supertype=&Pep_Seq=&Pep_Len=&Anchor_Class=&Pub_Year=&Resolution=")
+# pepsdf_hla3db <- html_elements(htmlobj, "table") %>% html_table(header = F) %>% extract2(1)
+# colnames(pepsdf_hla3db) <- pepsdf_hla3db[1, ] %>% unlist(use.names = FALSE)
+# pepsdf_hla3db <- pepsdf_hla3db[-1, ]
+# write.csv(pepsdf_hla3db, file = "data/dataset_preparation_1/HLA3DB_MHCs_260703.csv", quote = FALSE, row.names = FALSE)
+
+# collecting PDB IDs from the HLA3DB ----------
+pepsdf_hla3db <- read.csv("data/dataset_preparation_1/HLA3DB_MHCs_260703.csv")
+pepsdf_hla3db %<>% filter(HLA.Allele %in% c("HLA-A*02:01", "HLA-A*24:02", "HLA-C*04:01"))
+pdbids_hla3db <- pepsdf_hla3db$PDB.ID %>% strsplit("-") %>% map_chr(~.x[1]) %>% unique
+save(pdbids_hla3db, file = "data/dataset_preparation_1/pdbids_hla3db_A0201_A2402_C0401_SB_260703.RData")
+```
+
+Collecting entries from the histo.fyi database:
+```{r}
+# # loading information from the histoy.fyi API ------------
+# # Load the required libraries
+# library(httr)
+# library(jsonlite)
+# 
+# base_url <- "https://api.histo.fyi/v1/search" # defining base URL
+# 
+# structsdfs_list <- list()
+# page_num = 0
+# while(TRUE) {
+#   page_num = page_num + 1
+#   message("Downloading page ", page_num)
+#   params <- list(query = "HLA", page_number = page_num) # defining most important parameters
+# 
+#   # doing the GET request
+#   response <- GET(
+#     url = base_url,
+#     query = params, # Adds the ?query=...&page_number=...
+#     add_headers("accept" = "application/json") # Adds the Accept header
+#   )
+# 
+#   # check for succesful response
+#   if (http_error(response)) stop("API request failed with status: ", status_code(response))
+# 
+#   # extracting JSON content
+#   data <- content(response, "text", encoding = "UTF-8")
+#   parsed_search_results <- fromJSON(data)
+#   outdf <- parsed_search_results$search_results
+#   if(nrow(outdf) == 0) break
+#   structsdfs_list[[length(structsdfs_list) + 1]] <- outdf
+# }
+# 
+# save(structsdfs_list, file = "data/dataset_preparation_1/structsdfs_list_histofyi_260703.RData")
+# 
+# # filtering for structures having bound peptides ------------
+# load("data/dataset_preparation_1/structsdfs_list_histofyi_260703.RData")
+# structsdfs_list_9mers <- map(structsdfs_list, \(crnt_structdf) {
+#   crnt_structdf %<>% filter(map_lgl(components, ~"peptide" %in% .x))
+#   crnt_structdf <- crnt_structdf[nchar(crnt_structdf$assigned_chains$peptide$sequence) == 9, ]
+# })
+# save(structsdfs_list_9mers, file = "data/dataset_preparation_1/structsdfs_list_histofyi_9mers_260703.RData")
+# 
+# creating a simplified pepsdf from the 9mers data ----------
+load("data/dataset_preparation_1/structsdfs_list_histofyi_9mers_260703.RData")
+
+pepsdf <- data.frame(pdb_id = map(structsdfs_list_9mers, ~.x$pdb_code) %>%
+                                unlist(use.names = F) %>%
+                                toupper,
+                              allele = map(structsdfs_list_9mers, ~.x$allele$alpha$name) %>%
+                                unlist(use.names = F),
+                              peptide = map(structsdfs_list_9mers, ~.x$peptide_sequence) %>%
+                                unlist(use.names = F))
+save(pepsdf, file = "data/dataset_preparation_1/pepsdf_histofyi_9mers_260703.RData")
+
+# collecting the PDB IDs -----------
+pepsdf_histofyi <- immunoinfo.tools::loadIn("data/dataset_preparation_1/pepsdf_histofyi_9mers_260703.RData")[[1]]
+pepsdf_histofyi %<>% filter(allele %in% c("HLA-A*02:01", "HLA-A*24:02", "HLA-C*04:01"))
+pdbids_histofyi <- pepsdf_histofyi$pdb_id %>% unique
+save(pdbids_histofyi, file = "data/dataset_preparation_1/pdbids_histofyi_A0201_A2402_C0401_SB_260703.RData")
+```
+
+Assembling a peptide-PDBID dictionary:
+```{r}
+pdbids_all <- c(loadIn("data/dataset_preparation_1/pdbids_histofyi_A0201_A2402_C0401_SB_260703.RData")[[1]],
+                loadIn("data/dataset_preparation_1/pdbids_hla3db_A0201_A2402_C0401_SB_260703.RData")[[1]]) %>%
+  unique %>% 
+  sort
+
+pepsdf_histofyi <- immunoinfo.tools::loadIn("data/dataset_preparation_1/pepsdf_histofyi_9mers_260703.RData")[[1]]
+pepsdf_hla3db <- read.csv("data/dataset_preparation_1/HLA3DB_MHCs_260703.csv")
+
+pepsdf_histofyi %<>% 
+  # dplyr::select(-allele) %>% 
+  set_colnames(c("pdbid", "allele", "peptide")) %>% 
+  unique %>% 
+  filter(pdbid %in% pdbids_all)
+
+pepsdf_hla3db %<>% 
+  mutate(pdbid = PDB.ID %>% strsplit("-") %>% map_chr(~.x[1])) %>% 
+  filter(pdbid %in% pdbids_all) %>% 
+  mutate(peptide = Peptide.Sequence) %>% 
+  dplyr::select(pdbid, HLA.Allele, peptide) %>% 
+  rename(allele = HLA.Allele) %>% 
+  unique
+
+pepsdf <- rbind(pepsdf_histofyi, pepsdf_hla3db) %>% unique %>% set_rownames(NULL)
+
+pepsdf %<>% filter(!grepl("X", peptide))
+save(pepsdf, file = "data/dataset_preparation_1/pepsdf_experimental_260703.RData")
+```
+
+## Downloading the PDB files
+```{r}
+# collecting all the PDB IDs ----------
+pdbids_all <- c(loadIn("data/dataset_preparation_1/pdbids_histofyi_A0201_A2402_C0401_SB_260703.RData")[[1]],
+                loadIn("data/dataset_preparation_1/pdbids_hla3db_A0201_A2402_C0401_SB_260703.RData")[[1]]) %>%
+  unique %>% 
+  sort
+
+# collecting the metadata about the PDB entries ----------
+# metadf <- bio3d::pdb.annotate(pdbids_all)
+# save(metadf, file = "data/dataset_preparation_1/metadf_experimental_PDBs_260703.RData") # downloaded on 3rd July 2026
+load("data/dataset_preparation_1/metadf_experimental_PDBs_260703.RData")
+pdbids_all <- metadf$structureId %>% unique %>% sort
+
+# fetching the PDB files ----------
+dir.create("data/dataset_preparation_1/pdb_files_experimental_260703/")
+bio3d::get.pdb(ids = pdbids_all,
+               path = paste0("data/dataset_preparation_1/pdb_files_experimental_260703/"),
+               gzip = FALSE)
+```
+
+## Pairing up components of biological assemblies in each experimental PDB file
+```{r}
+# collecting polypeptide chain lengths and the constituents that belong to each other ----------
+pdb_paths <- list.files("data/dataset_preparation_1/pdb_files_experimental_260703/", full.names = TRUE)
+pdb_ids <- list.files("data/dataset_preparation_1/pdb_files_experimental_260703/") %>% gsub("\\.pdb", "", .)
+
+# running the protein component extraction and pairing -------------
+protein_components <- map(pdb_paths, \(crnt_pdb_path) {
+  pdbobj <- bio3d::read.pdb(file = crnt_pdb_path, rm.alt = T)
+  chains <- pdbobj$atom$chain %>% unique %>% sort
+  peptides <- map_chr(chains, \(crnt_chain) {
+    selobj <- bio3d::atom.select(pdbobj, chain = crnt_chain)
+    bio3d::trim.pdb(pdbobj, selobj) %>% bio3d::pdbseq() %>% paste0(collapse = "")
+  }) %>% set_names(chains)
+  
+  chainlngths <- data.frame(chain = chains,
+                            n_aas = nchar(peptides)) %>%
+    mutate(has_alt = map_dbl(chain, ~pdbobj$atom %>% filter(chain == .x) %>% pull(alt) %>% is.na %>% `!` %>% any)) %>% 
+    mutate(component = case_when(n_aas >= 8 & n_aas <= 12 ~ "peptide",
+                                 n_aas >= 250 & n_aas <= 300 ~ "alpha",
+                                 n_aas >= 90 & n_aas <= 110 ~ "beta")) %>% 
+    mutate(peptide = peptides[chain])
+  
+  if(chainlngths$component %>% is.na %>% any) {
+    return(list(chainlngths = NA,
+                complex_constituents = NA))
+  } else {
+    
+    # identifying chains that belong together
+    pep_chains <- chainlngths %>% filter(component == "peptide") %>% pull(chain)
+    alpha_chains <- chainlngths %>% filter(component == "alpha") %>% pull(chain)
+    beta_chains <- chainlngths %>% filter(component == "beta") %>% pull(chain)
+    
+    complex_constituents <- expand.grid(pep_chains = pep_chains,
+                                        alpha_chains = alpha_chains,
+                                        beta_chains = beta_chains, stringsAsFactors = FALSE)
+    
+    # determining the distances between the "centroids" of the separate polypeptide chains
+    comdists_chains <- map(chainlngths$chain, ~bio3d::com(pdbobj, inds = bio3d::atom.select(pdbobj, chain = .x), use.mass = FALSE)) %>% 
+      do.call(rbind, .) %>% 
+      Rfast::Dist() %>% 
+      set_rownames(chainlngths$chain) %>% 
+      set_colnames(chainlngths$chain)
+    
+    # identifying the combinations with the n smallest 
+    complex_constituents$sum_comdists <- pmap_dbl(list(complex_constituents$pep_chains,
+                                                       complex_constituents$alpha_chains,
+                                                       complex_constituents$beta_chains),
+                                                  \(crnt_pepchain = ..1, crnt_alphachain = ..2, crnt_betachain = ..3) {
+                                                    comdists_chains[c(crnt_pepchain, crnt_alphachain, crnt_betachain),
+                                                                    c(crnt_pepchain, crnt_alphachain, crnt_betachain)] %>% sum
+                                                  })
+    
+    complex_constituents %<>% 
+      arrange(by = sum_comdists) %>% 
+      head(length(pep_chains))
+    
+    list(chainlngths = chainlngths,
+         complex_constituents = complex_constituents)
+}
+}, .progress = TRUE) %>% set_names(pdb_ids)
+
+names(protein_components) <- pdb_ids
+
+# excluding PDB database entries that carry additional components as well (e.g. TCRs) ----------
+protein_components <- protein_components[protein_components %>%
+                                           map_dbl(~.x[[1]] %>% length) %>%
+                                           is_greater_than(1)] # 228 elements remained
+
+# saving ----------
+save(protein_components, file = "data/dataset_preparation_1/protein_components_experimental_260703.RData")
+```
+
+## Splitting PDB files into separate biological assemblies
+```{r}
+load("data/dataset_preparation_1/protein_components_experimental_260703.RData")
+
+# removing problematic entries (not having any of the 3 consitutents of a pMHC complex) ------------
+protein_components <- protein_components[protein_components %>% map_dbl(~.x$chainlngths %>% length) %>% equals(1) %>% `!`]
+
+# collecting the number of complexes in the PDB file, as well as the aa length of the bound peptide ------------
+n_complexes <- map_dbl(protein_components, ~.x %>% extract2("complex_constituents") %>% nrow)
+n_aas_peptide <- map_dbl(protein_components, ~.x$chainlngths$n_aas %>% min)
+
+# PDB files with different different peptide lengths ---------- 
+table(n_aas_peptide) %>% 
+  as.data.frame %>% 
+  knitr::kable() # 18 nonamers left
+
+# PDB files with different numbers of complexes ---------- 
+table(n_complexes) %>%
+  as.data.frame %>%
+  knitr::kable() # 11 PDBs with 1 biol. assembly, 6 PDBs with 2 biol. assemblies, 1 with 4
+
+# generating all separated complexes from PDBs ----------
+pdbids <- names(protein_components)
+
+dir.create("data/dataset_preparation_1/pdb_files_experimental_separated_260703/")
+walk(pdbids, \(crnt_pdbid) {
+  crnt_pdb_data <- protein_components[[crnt_pdbid]]
+  pdbobj <- bio3d::read.pdb(paste0("data/dataset_preparation_1/pdb_files_experimental_260703/", crnt_pdbid, ".pdb"))
+
+  crnt_pdb_data %>%
+    extract2("complex_constituents") %>%
+    dplyr::select(pep_chains, alpha_chains, beta_chains) %>%
+    mutate(id = 1:nrow(.), .before = 1) %>%
+    apply(1, \(x) {
+      crnt_selobj <- bio3d::atom.select(pdbobj, chain = x[-1])
+      pdbobj_complex <- bio3d::trim.pdb(pdbobj, crnt_selobj)
+      bio3d::write.pdb(pdb = pdbobj_complex,
+                       file = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_260703/",
+                                     crnt_pdbid, "_", x[1] %>% as.numeric, ".pdb"))
+    })
+}, .progress = TRUE)
+```
+
+## Predicting benchmark structures
+In this section I will perform 3D structure predictions for the HLA allele-peptide pairs found in the experimental datasets.
+
+Predictions started at 11.04 6th July, 2026 @ newWS. Expected to last for ~70 minutes.
+
+```{r}
+# loading data -----------
+load("data/dataset_preparation_1/pepsdf_experimental_260703.RData")
+load("data/dataset_preparation_1/protein_components_experimental_260703.RData")
+
+pepsdf %<>% # n = 179 entries from the RCSB PDBdb
+  filter(pdbid %in% names(protein_components)) %>% 
+  filter(nchar(peptide) == 9)
+
+pepsdf %>% # n = 147 unique pHLAs
+  dplyr::select(-1) %>% 
+  unique %>% 
+  nrow()
+
+# collecting HLA sequences ------------
+# I will try to find the homologous sequences that were used in A0201-focused predictions
+A0201_seq = "GSHSMRYFFTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEGPEYWDGETRKVKAHSQTHRVDLGTLRGYYNQSEAGSHTVQRMYGCDVGSDWRFLRGYHQYAYDGKDYIALKEDLRSWTAADMAAQTTKHKWEAAHVAEQLRAYLEGTCVEWLRRYLENGKETLQRT" %>% Biostrings::AAStringSet() # from the script attached to the MHC-Fine publication
+
+hlaI_protseqs <- c(Biostrings::readAAStringSet("data/HLA_prot/A_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/B_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/C_prot.fasta"))
+
+names(hlaI_protseqs) %<>% strsplit(" ") %>% map_chr(~.x[2])
+alleles_unq <- pepsdf$allele %>% unique %>% sort %>% gsub("HLA-", "", .)
+hlaI_protseq_names_short <- names(hlaI_protseqs) %>% strsplit("\\:") %>% map_chr(~.x[1:2] %>% paste0(collapse = ":"))
+hlaI_protseqs <- hlaI_protseqs[fmatch(alleles_unq, hlaI_protseq_names_short)]
+names(hlaI_protseqs) <- alleles_unq
+
+hla_seqs <- map(hlaI_protseqs, \(crnt_seq) {
+  algnmnt <- pwalign::pairwiseAlignment(A0201_seq, crnt_seq)
+  algnmntdf <- data.frame(A0201 = algnmnt@pattern %>% as.character() %>% strsplit("") %>% unlist(use.names = F),
+                          other_allele = algnmnt@subject %>% as.character() %>% strsplit("") %>% unlist(use.names = F))
+  
+  # extracting the longest stretch of matching sequence (with no dashes)
+  rleobj <- rle(algnmntdf$A0201 != "-")
+  rledf <- data.frame(lngths = rleobj$lengths, aa_lgl = rleobj$values)
+  rledf$end_pos <- cumsum(rledf$lngths)
+  rledf$start_pos <- rledf$end_pos - rledf$lngths + 1
+  rledf$end_pos <- rledf$start_pos + rledf$lngths - 1
+  
+  start_pos_maxlngth <- rledf$start_pos[which.max(rledf$lngths)]
+  end_pos_maxlngth <- rledf$end_pos[which.max(rledf$lngths)]
+  
+  algnmntdf <- algnmntdf[start_pos_maxlngth:end_pos_maxlngth, ]
+  
+  other_allele_seq <- algnmntdf$other_allele %>% paste0(collapse = "")
+  
+  return(other_allele_seq)
+}, .progress = TRUE)
+
+hla_seqs %<>% unlist(use.names = F) %>% set_names(names(hlaI_protseqs))
+hla_seqs %>% nchar %>% hist() # sequence lengths are between 176 and 182, great!
+names(hla_seqs) %<>% gsub("\\*", "", .) %>% gsub("\\:", "", .)
+
+# creating the MHC-Fine input ----------
+pepsdf %<>% 
+  mutate(allele_short = allele %>%
+           gsub("HLA-", "", .) %>%
+           gsub("\\*", "", .) %>%
+           gsub("\\:", "", .), .after = allele)
+
+inputdf <- data.frame(unique_id = paste0(pepsdf$allele_short, ".", pepsdf$peptide),
+                      protein_sequence = hla_seqs[pepsdf$allele_short] %>% unlist(use.names = FALSE),
+                      peptide_sequence = pepsdf$peptide) %>% unique
+
+write.csv(inputdf, file = "data/dataset_preparation_1/mhcfine_input_pdbdb_review_260706.csv",
+          quote = FALSE, row.names = FALSE)
+```
+
+## Alignment of experimental structures to their predicted counterparts
+Collecting the file paths for experimental and predicted PDB files:
+```{r}
+load("data/dataset_preparation_1/pepsdf_experimental_260703.RData")
+load("data/dataset_preparation_1/protein_components_experimental_260703.RData")
+
+pepsdf %<>% 
+  filter(pdbid %in% names(protein_components)) %>% 
+  mutate(allele = allele %>% gsub("HLA-", "", .) %>% gsub("\\*", "", .) %>% gsub("\\:", "", .)) %>% 
+  filter(nchar(peptide) == 9) %>% 
+  unique %>% 
+  filter(!grepl("X", peptide))
+
+pdbsdf <- pepsdf %>% 
+  mutate(pdb_file_experimental = map(pdbid, ~list.files("data/dataset_preparation_1/pdb_files_experimental_separated_260703/") %>%
+                                        magrittr::extract(grepl(.x, .)))) %>% 
+  filter(map_dbl(pdb_file_experimental, length) > 0) %>% 
+  tidyr::unnest(cols = c("pdb_file_experimental")) %>% 
+  mutate(pdb_path_experimental = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_260703/", pdb_file_experimental)) %>% 
+  mutate(pdb_path_predicted = paste0("data/dataset_preparation_1/mhcfine_output_pdbdb_review_260703/", allele, ".", peptide, ".pdb")) %>% 
+  mutate(biol_assembly_id = pdb_file_experimental %>% strsplit("_") %>% map_chr(~.x[2]) %>% gsub("\\.pdb", "", .) %>% as.numeric, .after = pdbid) %>% 
+  mutate(alpha_chain_id = map2_chr(pdbid, biol_assembly_id, ~protein_components[[.x]]$complex_constituents$alpha_chains[.y]),
+         pep_chain_id = map2_chr(pdbid, biol_assembly_id, ~protein_components[[.x]]$complex_constituents$pep_chains[.y]))
+
+# checking if we have all the structures predicted by MHC-fine ----------
+all(pdbsdf$pdb_path_predicted %in% list.files("data/dataset_preparation_1/mhcfine_output_pdbdb_review_260703", full.names = TRUE)) # MINDEN MEGVOLT!
+
+save(pdbsdf, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_mhcfine_260703.RData")
+```
+
+Performing the alignment steps between the experimental structures to their corresponding predicted ones:
+```{r}
+load("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_mhcfine_260703.RData")
+outdir = "data/dataset_preparation_1/pdb_files_experimental_separated_aligned_260703/"
+dir.create(outdir)
+
+pwalk(list(pdbsdf$pdb_path_predicted,
+           pdbsdf$pdb_path_experimental,
+           pdbsdf$pdb_file_experimental, 
+           pdbsdf$alpha_chain_id),
+     \(crnt_pdbpath_pred = ..1,
+       crnt_pdbpath_exp = ..2,
+       crnt_pdbfile_exp = ..3,
+       crnt_alpha_chain_exp = ..4) {
+       message(crnt_pdbfile_exp)
+       pymol.align(pdbpath_ref = crnt_pdbpath_pred,
+                   pdbpath_target = crnt_pdbpath_exp,
+                   alpha_chain_ref = "A",
+                   alpha_chain_target = crnt_alpha_chain_exp,
+                   outpath = paste0(outdir, crnt_pdbfile_exp))
+     }, .progress = TRUE)
+```
+
+## Collecting release dates to classify training/validation/test dataset assignment of each PDB
+Here, I will collect all the relevant PDB identifiers for the analysis, and check their date of upload to mark them based on the dates provided in the Glukhov et al. 2024 paper describing MHC-fine as cutpoints to create the training, validation and test datasets.
+
+```{r}
+load("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_260703.RData")
+
+# 1. copy the following string into the search field for Entry ID(s) (https://www.rcsb.org/search/advanced)
+pdbsdf$pdbid %>% unique %>% sort %>% paste0(collapse = ",") 
+
+# 2. Click on Tabular Reports button
+# 3. Select "Create Custom Report" from the "Select Report" drop-down menu
+# 4. Place a tick next to "Release Date" option.
+# 5. Click on the "Run Report" button.
+# 6. Click on the "CSV" download button.
+
+read.csv("data/dataset_preparation_1/rcsb_pdb_custom_report_20260703113152.csv")
+```
+
+# Preparing the benchmarking of APE-Gen 2.0 on experimental pHLA structures
+## Creating APE-Gen input, performing structural predictions
+For the bash script to be used for the batch run of APE-Gen inside its Docker container, see `run_apegen_for_benchmark_set.sh`.
+
+```{r}
+inputdf <- read.csv("data/dataset_preparation_1/mhcfine_input_pdbdb_review_260706.csv")
+inputdf %<>% 
+  mutate(allele_short = unique_id %>% strsplit("\\.") %>% map_chr(~.x[1])) %>% 
+  mutate(allele = paste0("HLA-", substr(allele_short, 1, 1), "*", substr(allele_short, 2, 3), ":", substr(allele_short, 4, 5))) %>% 
+  dplyr::select(allele, peptide_sequence) %>% 
+  set_colnames(c("allele", "peptide")) %>% 
+  dplyr::select(peptide, allele)
+
+write.csv(x = inputdf,
+          file = "data/dataset_preparation_1/apegen_input_pdbdb_review_260706.csv",
+          quote = FALSE,
+          row.names = FALSE)
+```
+
+## Collecting the best predicted structures
+```{r}
+pepsdf <- read.csv("data/dataset_preparation_1/apegen_input_pdbdb_review_260706.csv")
+
+pepsdf %<>% 
+  mutate(dir_path = paste0("data/dataset_preparation_1/apegen_output_pdbdb_review_raw_260706/",
+                           allele %>% gsub("\\:", "_", .) %>% gsub("\\*", "_", .), "_",
+                           peptide, "/")) %>% 
+  mutate(flnm = map_chr(dir_path, \(crnt_path) {
+    affdf <- read.csv(paste0(crnt_path, "successful_conformations_statistics.csv"))
+    paste0("pMHC_", sprintf("%04d", affdf$Peptide.index[which.min(affdf$Affinity)]), ".pdb")
+  })
+  ) %>%
+  mutate(pdb_path = paste0(dir_path, "results/5_final_conformations/", flnm))
+
+dir.create("data/dataset_preparation_1/apegen_output_pdbdb_review_260706/")
+pwalk(list(pepsdf$pdb_path,
+           pepsdf$flnm,
+           pepsdf$allele %>% gsub("\\*", "", .) %>% gsub("\\:", "", .) %>% gsub("HLA-", "", .),
+           pepsdf$peptide),
+      \(crnt_path_from = ..1, crnt_flnm = ..2, crnt_allele = ..3, crnt_peptide =..4) {
+        file.copy(from = crnt_path_from,
+                  to = paste0("data/dataset_preparation_1/apegen_output_pdbdb_review_260706/",
+                              crnt_allele, ".", crnt_peptide, ".pdb"))
+      })
+```
+
+## Alignment of experimental structures to their predicted counterparts
+Collecting the file paths for experimental and predicted PDB files:
+```{r}
+load("data/dataset_preparation_1/pepsdf_experimental_260703.RData")
+load("data/dataset_preparation_1/protein_components_experimental_260703.RData")
+
+pepsdf %<>% 
+  filter(pdbid %in% names(protein_components)) %>% 
+  mutate(allele = allele %>% gsub("HLA-", "", .) %>% gsub("\\*", "", .) %>% gsub("\\:", "", .)) %>% 
+  filter(nchar(peptide) == 9) %>% 
+  unique %>% 
+  filter(!grepl("X", peptide))
+
+pdbsdf <- pepsdf %>% 
+  mutate(pdb_file_experimental = map(pdbid, ~list.files("data/dataset_preparation_1/pdb_files_experimental_separated_260703/") %>%
+                                        extract(grepl(.x, .)))) %>% 
+  filter(map_dbl(pdb_file_experimental, length) > 0) %>% 
+  tidyr::unnest(cols = c("pdb_file_experimental")) %>% 
+  mutate(pdb_path_experimental = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_260703/", pdb_file_experimental)) %>% 
+  mutate(pdb_path_predicted = paste0("data/dataset_preparation_1/apegen_output_pdbdb_review_260706/", allele, ".", peptide, ".pdb")) %>% 
+  mutate(biol_assembly_id = pdb_file_experimental %>% strsplit("_") %>% map_chr(~.x[2]) %>% gsub("\\.pdb", "", .) %>% as.numeric, .after = pdbid) %>% 
+  mutate(alpha_chain_id = map2_chr(pdbid, biol_assembly_id, ~protein_components[[.x]]$complex_constituents$alpha_chains[.y]),
+         pep_chain_id = map2_chr(pdbid, biol_assembly_id, ~protein_components[[.x]]$complex_constituents$pep_chains[.y]))
+
+# checking if we have all the structures predicted by MHC-fine ----------
+all(pdbsdf$pdb_path_predicted %in% list.files("data/dataset_preparation_1/apegen_output_pdbdb_review_260706", full.names = TRUE)) # MINDEN MEGVOLT!
+
+save(pdbsdf, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_apegen_260706.RData")
+```
+
+Performing the alignment steps between the experimental structures to their corresponding predicted ones, based on the alpha 1 and alpha 2 chains:
+```{r}
+load("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_apegen_260706.RData")
+outdir = "data/dataset_preparation_1/pdb_files_experimental_separated_aligned_a12only_apegen_260706/"
+dir.create(outdir)
+
+A0201_seq = "GSHSMRYFFTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEGPEYWDGETRKVKAHSQTHRVDLGTLRGYYNQSEAGSHTVQRMYGCDVGSDWRFLRGYHQYAYDGKDYIALKEDLRSWTAADMAAQTTKHKWEAAHVAEQLRAYLEGTCVEWLRRYLENGKETLQRT" %>% Biostrings::AAStringSet()
+
+pwalk(list(pdbsdf$pdb_path_predicted, pdbsdf$pdb_path_experimental, pdbsdf$pdb_file_experimental, pdbsdf$alpha_chain_id),
+     \(crnt_pdbpath_pred = ..1,
+       crnt_pdbpath_exp = ..2,
+       crnt_pdbfile_exp = ..3,
+       crnt_alpha_chain_exp = ..4) {
+       message(crnt_pdbfile_exp)
+       pymol.align.subseq(pdbpath_ref = crnt_pdbpath_pred,
+                          pdbpath_target = crnt_pdbpath_exp,
+                          alpha_chain_ref = "A",
+                          subseq = A0201_seq,
+                          alpha_chain_target = crnt_alpha_chain_exp,
+                          outpath = paste0(outdir, crnt_pdbfile_exp))
+     }, .progress = TRUE)
+```
+
+# Preparing the benchmarking of AlphaFold3 on experimental pHLA structures
+## Collecting the AlphaFold3 inputs
+```{r}
+# loading benchmark peptides ----------
+load("data/dataset_preparation_1/pepsdf_experimental_260703.RData")
+load("data/dataset_preparation_1/protein_components_experimental_260703.RData")
+
+pepsdf %<>% 
+  filter(pdbid %in% names(protein_components)) %>% 
+  mutate(allele = allele %>% gsub("HLA-", "", .) %>% gsub("\\*", "", .) %>% gsub("\\:", "", .)) %>% 
+  dplyr::select(allele, peptide) %>% 
+  unique
+
+# loading HLA sequences ----------
+hlaI_protseqs <- c(Biostrings::readAAStringSet("data/HLA_prot/A_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/B_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/C_prot.fasta"))
+
+names(hlaI_protseqs) %<>% strsplit(" ") %>% map_chr(~.x[2])
+
+alleles_unq <- pepsdf$allele %>% unique %>% sort
+
+alleles_unq_long <- paste0(substr(alleles_unq, 1, 1), "*", substr(alleles_unq, 2, 3), ":", substr(alleles_unq, 4, nchar(alleles_unq)))
+hlaI_protseq_names_short <- names(hlaI_protseqs) %>% strsplit("\\:") %>% map_chr(~.x[1:2] %>% paste0(collapse = ":"))
+hlaI_protseqs <- hlaI_protseqs[fmatch(alleles_unq_long, hlaI_protseq_names_short)]
+names(hlaI_protseqs) <- alleles_unq
+
+pepsdf$hla_seq <- hlaI_protseqs[match(pepsdf$allele, names(hlaI_protseqs))] %>% as.character()
+
+save(pepsdf, file = "data/dataset_preparation_1/pepsdf_review_benchmarkset_alphafold3_inputs.RData")
+```
+
+## Identifying top structural models from the AlphaFold3 outputs
+From Franciska, Balázs and myself:
+```{r}
+# collecting outputs ------------
+pathsdf <- data.frame(output_dir_path = list.files("data/dataset_preparation_1/alphafold3_output_pdbdb_review_raw_260707/outputs/", full.names = TRUE)) %>% 
+  mutate(allele = output_dir_path %>% strsplit("\\/") %>% map_chr(tail, 1) %>% strsplit("\\_") %>% map_chr(head, 1) %>% toupper,
+         peptide = output_dir_path %>% strsplit("\\/") %>% map_chr(tail, 1) %>% strsplit("\\_") %>% map_chr(tail, 1) %>% toupper)
+
+# collecting quality values for each structure ----------
+dir.create("data/dataset_preparation_1/alphafold3_output_pdbdb_review_260707/")
+pwalk(list(pathsdf$output_dir_path, pathsdf$allele, pathsdf$peptide), \(crnt_dirpath = ..1, crnt_allele = ..2, crnt_peptide = ..3) {
+  qual_json_files <- list.files(crnt_dirpath, full.names = TRUE) %>% extract(grepl("confidences", .))
+  quallist <- map(qual_json_files, ~rjson::fromJSON(file = .x))
+  
+  qualsdf <- map_df(quallist, \(crnt_qualobj) {
+    chain_pair_iptm_mtx <- crnt_qualobj$chain_pair_iptm %>% do.call(rbind, .)
+    chain_pair_pae_mtx <- crnt_qualobj$chain_pair_pae_min %>% do.call(rbind, .) # Predicted Aligned Error in Angstroms
+    
+    crnt_qualobj$iptm
+    data.frame(iptm_hla = chain_pair_iptm_mtx[1, 1],
+               iptm_peptide = chain_pair_iptm_mtx[2, 2],
+               iptm_interchain = chain_pair_iptm_mtx[1, 2],
+               iptm_overall = crnt_qualobj$iptm,
+               ptm_overall = crnt_qualobj$ptm,
+               has_clash = crnt_qualobj$has_clash,
+               ranking_score = crnt_qualobj$ranking_score)
+    
+  }) %>% mutate(ix = 1:length(quallist), .before = 1)
+  
+  # chosing the best ranking score and iptm_interchain model
+  max_ranking_score <- qualsdf$ranking_score %>% max
+  qualsdf %<>% filter(ranking_score == max_ranking_score)
+  max_iptm_interchain <- qualsdf$iptm_interchain %>% max
+  qualsdf %<>% filter(iptm_interchain == max_iptm_interchain)
+  
+  # in case we still get a tie, simply chosing the model with the smallest index
+  ix_chosen <- qualsdf %>% pull(ix) %>% head(1)
+  
+  cif_file_chosen <- list.files(crnt_dirpath, full.names = TRUE) %>%
+    extract(grepl(paste0(ix_chosen, "\\.cif"), .))
+  
+  file.copy(from = cif_file_chosen, to = paste0("data/dataset_preparation_1/alphafold3_output_pdbdb_review_260707/", crnt_allele, ".", crnt_peptide, ".cif"))
+})
+```
+
+From Máté:
+```{r}
+# # extracting and removing zip files ---------
+# zippaths <- list.files("data/dataset_preparation_1/alphafold3_output_pdbdb_review_raw_260707/outputs_Máté/", full.names = TRUE)
+# crnt_zippath <- zippaths[1]
+# walk(zippaths, \(crnt_zippath) {
+#   crnt_zipid <- crnt_zippath %>% strsplit("\\/") %>% map_chr(tail, 1) %>% gsub("\\.zip", "", .)
+#   system(paste0("unzip ", crnt_zippath, " -d data/dataset_preparation_1/alphafold3_output_pdbdb_review_raw_260707/outputs_Máté/", crnt_zipid, "/"))
+# })
+# 
+# file.remove(zippaths)
+
+# collecting outputs ------------
+pathsdf <- data.frame(output_dir_path = list.files("data/dataset_preparation_1/alphafold3_output_pdbdb_review_raw_260707/outputs_Máté/", full.names = TRUE))
+pathsdf <- map_df(pathsdf$output_dir_path, \(crnt_path) {
+  jobrequestobj <- list.files(crnt_path, full.names = TRUE) %>%
+  extract(grepl("job_request", .)) %>% 
+  rjson::fromJSON(file = .)
+  
+  data.frame(peptide = jobrequestobj[[1]]$sequences[[2]]$proteinChain$sequence,
+             hla_seq = jobrequestobj[[1]]$sequences[[1]]$proteinChain$sequence)
+}) %>% cbind(pathsdf, .)
+
+# loading HLA sequences, back-tracking alleles ----------
+hlaI_protseqs <- c(Biostrings::readAAStringSet("data/HLA_prot/A_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/B_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/C_prot.fasta"))
+
+names(hlaI_protseqs) %<>% strsplit(" ") %>% map_chr(~.x[2])
+hlaI_protseq_names_short <- names(hlaI_protseqs) %>% strsplit("\\:") %>% map_chr(~.x[1:2] %>% paste0(collapse = ":"))
+alleles_unq <- c("A*02:01", "A*24:02", "C*04:01")
+hlaI_protseqs <- hlaI_protseqs[fmatch(alleles_unq, hlaI_protseq_names_short)]
+names(hlaI_protseqs) <- alleles_unq
+hlaI_protseqs %<>% as.character()
+
+pathsdf$allele <- names(hlaI_protseqs)[fmatch(pathsdf$hla_seq, hlaI_protseqs)] %>% gsub("\\*", "", .) %>% gsub("\\:", "", .)
+pathsdf$hla_seq <- NULL
+
+# collecting quality values for each structure ----------
+dir.create("data/dataset_preparation_1/alphafold3_output_pdbdb_review_260707/")
+pwalk(list(pathsdf$output_dir_path, pathsdf$allele, pathsdf$peptide), \(crnt_dirpath = ..1, crnt_allele = ..2, crnt_peptide = ..3) {
+  qual_json_files <- list.files(crnt_dirpath, full.names = TRUE) %>% extract(grepl("confidences", .))
+  quallist <- map(qual_json_files, ~rjson::fromJSON(file = .x))
+  
+  qualsdf <- map_df(quallist, \(crnt_qualobj) {
+    chain_pair_iptm_mtx <- crnt_qualobj$chain_pair_iptm %>% do.call(rbind, .)
+    chain_pair_pae_mtx <- crnt_qualobj$chain_pair_pae_min %>% do.call(rbind, .) # Predicted Aligned Error in Angstroms
+    
+    crnt_qualobj$iptm
+    data.frame(iptm_hla = chain_pair_iptm_mtx[1, 1],
+               iptm_peptide = chain_pair_iptm_mtx[2, 2],
+               iptm_interchain = chain_pair_iptm_mtx[1, 2],
+               iptm_overall = crnt_qualobj$iptm,
+               ptm_overall = crnt_qualobj$ptm,
+               has_clash = crnt_qualobj$has_clash,
+               ranking_score = crnt_qualobj$ranking_score)
+    
+  }) %>% mutate(ix = 1:length(quallist), .before = 1)
+  
+  # chosing the best ranking score and iptm_interchain model
+  max_ranking_score <- qualsdf$ranking_score %>% max
+  qualsdf %<>% filter(ranking_score == max_ranking_score)
+  max_iptm_interchain <- qualsdf$iptm_interchain %>% max
+  qualsdf %<>% filter(iptm_interchain == max_iptm_interchain)
+  
+  # in case we still get a tie, simply chosing the model with the smallest index
+  ix_chosen <- qualsdf %>% pull(ix) %>% head(1)
+  
+  cif_file_chosen <- list.files(crnt_dirpath, full.names = TRUE) %>%
+    extract(grepl(paste0(ix_chosen, "\\.cif"), .))
+  
+  file.copy(from = cif_file_chosen, to = paste0("data/dataset_preparation_1/alphafold3_output_pdbdb_review_260707/", crnt_allele, ".", crnt_peptide, ".cif"))
+})
+```
+
+## Converting cif files into PDB files
+AlphaFold3's default outputs are CIF files, but as I have an established RMSD.pdb function for benchmarking, I will convert them into PDB files.
+```{r}
+outdir <- "data/dataset_preparation_1/alphafold3_output_pdbdb_review_pdb_260707/"
+dir.create(outdir)
+cifpaths <- list.files("data/dataset_preparation_1/alphafold3_output_pdbdb_review_260707/", full.names = TRUE)
+
+walk(cifpaths, \(crnt_cifpath) {
+  crnt_outpath <- crnt_cifpath %>% 
+    gsub("alphafold3_output_pdbdb_review_260707", "alphafold3_output_pdbdb_review_pdb_260707", .) %>% 
+    gsub("\\.cif", "\\.pdb", .)
+  pymol_cmd <- c(paste0("load ", crnt_cifpath, ", struct1"),
+                 paste0("save ", crnt_outpath, ", struct1")) %>% paste0(collapse = "; ")
+  
+  cmd <- paste0('pymol -cq -d "', pymol_cmd, '"')
+  system(cmd, ignore.stdout = TRUE)
+}, .progress = TRUE)
+```
+
+## Alignment of experimental structures
+Collecting the file paths for experimental and predicted PDB files:
+```{r}
+load("data/dataset_preparation_1/pepsdf_experimental_260703.RData")
+load("data/dataset_preparation_1/protein_components_experimental_260703.RData")
+
+pepsdf %<>% 
+  filter(pdbid %in% names(protein_components)) %>% 
+  mutate(allele = allele %>% gsub("HLA-", "", .) %>% gsub("\\*", "", .) %>% gsub("\\:", "", .)) %>% 
+  filter(nchar(peptide) == 9) %>% 
+  unique %>% 
+  filter(!grepl("X", peptide))
+
+pdbsdf <- pepsdf %>% 
+  mutate(pdb_file_experimental = map(pdbid, ~list.files("data/dataset_preparation_1/pdb_files_experimental_separated_260703/") %>%
+                                        extract(grepl(.x, .)))) %>% 
+  filter(map_dbl(pdb_file_experimental, length) > 0) %>% 
+  tidyr::unnest(cols = c("pdb_file_experimental")) %>% 
+  mutate(pdb_path_experimental = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_260703/", pdb_file_experimental)) %>% 
+  mutate(pdb_path_predicted = paste0("data/dataset_preparation_1/alphafold3_output_pdbdb_review_pdb_260707/", allele, ".", peptide, ".pdb")) %>% 
+  mutate(biol_assembly_id = pdb_file_experimental %>% strsplit("_") %>% map_chr(~.x[2]) %>% gsub("\\.pdb", "", .) %>% as.numeric, .after = pdbid) %>% 
+  mutate(alpha_chain_id = map2_chr(pdbid, biol_assembly_id, ~protein_components[[.x]]$complex_constituents$alpha_chains[.y]),
+         pep_chain_id = map2_chr(pdbid, biol_assembly_id, ~protein_components[[.x]]$complex_constituents$pep_chains[.y]))
+
+# checking if we have all the structures predicted by MHC-fine ----------
+table(pdbsdf$pdb_path_predicted %in% list.files("data/dataset_preparation_1/alphafold3_output_pdbdb_review_260707", full.names = TRUE)) # MINDEN MEGVOLT!
+setdiff(pdbsdf$pdb_path_predicted, list.files("data/dataset_preparation_1/alphafold3_output_pdbdb_review_260707", full.names = TRUE))
+
+save(pdbsdf, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_alphafold3_260707.RData")
+```
+
+Performing the alignment steps between the experimental structures to their corresponding predicted ones, based on the alpha 1 and alpha 2 chains:
+
+```{r}
+load("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_alphafold3_260707.RData")
+outdir = "data/dataset_preparation_1/pdb_files_experimental_separated_pdb_aligned_a1a2only_alphafold3_260707/"
+dir.create(outdir)
+
+A0201_seq = "GSHSMRYFFTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEGPEYWDGETRKVKAHSQTHRVDLGTLRGYYNQSEAGSHTVQRMYGCDVGSDWRFLRGYHQYAYDGKDYIALKEDLRSWTAADMAAQTTKHKWEAAHVAEQLRAYLEGTCVEWLRRYLENGKETLQRT" %>% Biostrings::AAStringSet()
+
+pwalk(list(pdbsdf$pdb_path_predicted, pdbsdf$pdb_path_experimental, pdbsdf$pdb_file_experimental, pdbsdf$alpha_chain_id),
+     \(crnt_pdbpath_pred = ..1,
+       crnt_pdbpath_exp = ..2,
+       crnt_pdbfile_exp = ..3,
+       crnt_alpha_chain_exp = ..4) {
+       message(crnt_pdbfile_exp)
+       quietly(pymol.align.subseq)(pdbpath_ref = crnt_pdbpath_pred,
+                                   pdbpath_target = crnt_pdbpath_exp,
+                                   alpha_chain_ref = "A",
+                                   subseq = A0201_seq,
+                                   alpha_chain_target = crnt_alpha_chain_exp,
+                                   outpath = paste0(outdir, crnt_pdbfile_exp))$result
+     }, .progress = TRUE)
+```
+
+# ANALYSIS! Comparing the RMSDs for the three predictors
+## C-alpha RMSD
+```{r}
+# pdbsdf_mhcfine <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_mhcfine_260703.RData")[[1]]
+# pdbsdf_apegen <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_apegen_260706.RData")[[1]]
+# pdbsdf_af3 <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_alphafold3_260707.RData")[[1]]
+# 
+# pdbsdf <- pdbsdf_mhcfine %>% 
+#   dplyr::rename(pdb_path_predicted_mhcfine = pdb_path_predicted,
+#                 pdb_path_experimental_mhcfine = pdb_path_experimental) %>% 
+#   left_join(pdbsdf_apegen %>%
+#               dplyr::rename(pdb_path_predicted_apegen = pdb_path_predicted,
+#                             pdb_path_experimental_apegen = pdb_path_experimental) %>% 
+#               dplyr::select(pdbid, biol_assembly_id, allele, peptide, pdb_path_predicted_apegen, pdb_path_experimental_apegen),
+#             by = c("pdbid", "biol_assembly_id", "allele", "peptide")) %>% 
+#   left_join(pdbsdf_af3 %>%
+#               dplyr::rename(pdb_path_predicted_af3 = pdb_path_predicted,
+#                             pdb_path_experimental_af3 = pdb_path_experimental) %>% 
+#               dplyr::select(pdbid, biol_assembly_id, allele, peptide, pdb_path_predicted_af3, pdb_path_experimental_af3),
+#             by = c("pdbid", "biol_assembly_id", "allele", "peptide"))
+# 
+# pdbsdf %<>% 
+#   mutate(pdb_path_experimental_mhcfine_aligned = pdb_path_experimental_mhcfine %>%
+#            gsub("pdb_files_experimental_separated", "pdb_files_experimental_separated_aligned", .),
+#          pdb_path_experimental_apegen_aligned = pdb_path_experimental_apegen %>%
+#            gsub("pdb_files_experimental_separated", "pdb_files_experimental_separated_aligned_a12only_apegen", .),
+#          pdb_path_experimental_af3_aligned = pdb_path_experimental_apegen %>%
+#            gsub("pdb_files_experimental_separated", "pdb_files_experimental_separated_pdb_aligned_a1a2only_alphafold3", .))
+# pdbsdf$pdb_path_experimental_apegen_aligned %<>% gsub("260703", "260706", .)
+# pdbsdf$pdb_path_predicted_apegen %<>% gsub("260703", "260706", .)
+# pdbsdf$pdb_path_experimental_af3_aligned %<>% gsub("260703", "260707", .)
+# 
+# pdbsdf$rmsd_mhcfine <- pmap_dbl(list(pdbsdf$pdb_path_experimental_mhcfine_aligned,
+#                                      pdbsdf$pdb_path_predicted_mhcfine,
+#                                      pdbsdf$pep_chain_id),
+#                                 \(crnt_path_exp = ..1, crnt_path_pred = ..2, crnt_pepchain_exp = ..3) {
+#                                   quietly(RMSD.pdb)(x = crnt_path_exp,
+#                                                     y = crnt_path_pred,
+#                                                     path_input = TRUE,
+#                                                     fit = FALSE,
+#                                                     elety = "CA",
+#                                                     chain_x = crnt_pepchain_exp,
+#                                                     chain_y = "B")$result
+#                                 }, .progress = T)
+# 
+# pdbsdf$rmsd_apegen <- pmap_dbl(list(pdbsdf$pdb_path_experimental_apegen_aligned,
+#                                     pdbsdf$pdb_path_predicted_apegen,
+#                                     pdbsdf$pep_chain_id),
+#                                \(crnt_path_exp = ..1, crnt_path_pred = ..2, crnt_pepchain_exp = ..3) {
+#                                  quietly(RMSD.pdb)(x = crnt_path_exp,
+#                                                    y = crnt_path_pred,
+#                                                    path_input = TRUE,
+#                                                    fit = FALSE,
+#                                                    elety = "CA",
+#                                                    chain_x = crnt_pepchain_exp,
+#                                                    chain_y = "C")$result
+#                                }, .progress = T)
+# 
+# pdbsdf$rmsd_af3 <- pmap_dbl(list(pdbsdf$pdb_path_experimental_af3_aligned,
+#                                  pdbsdf$pdb_path_predicted_af3,
+#                                  pdbsdf$pep_chain_id),
+#                             \(crnt_path_exp = ..1, crnt_path_pred = ..2, crnt_pepchain_exp = ..3) {
+#                               quietly(RMSD.pdb)(x = crnt_path_exp,
+#                                                 y = crnt_path_pred,
+#                                                 path_input = TRUE,
+#                                                 fit = FALSE,
+#                                                 elety = "CA",
+#                                                 chain_x = crnt_pepchain_exp,
+#                                                 chain_y = "B")$result
+#                             }, .progress = T)
+# 
+# save(pdbsdf, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_all3methods_benchmark_260703.RData")
+
+load("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_all3methods_benchmark_260703.RData")
+
+# adding training/validation/test set assignments ------------
+datesdf <- read.csv("data/dataset_preparation_1/rcsb_pdb_custom_report_20260703113152.csv", header = TRUE, skip = 1)
+# apegen_pdbids <- list.files("~/Programok/APE-Gen2.0/new_templates_final") %>% gsub("\\.pdb", "", .) # see APE-Gen 2.0 GitHub repository
+# save(apegen_pdbids, file = "data/dataset_preparation_1/apegen_template_pdbids.RData")
+load("data/dataset_preparation_1/apegen_template_pdbids.RData")
+
+pdbsdf %<>% 
+  mutate(release_date = datesdf$Release.Date[fmatch(pdbid, datesdf$Entry.ID)] %>% as.Date) %>% 
+  mutate(mhcfine_set = case_when(release_date < as.Date("2016-12-07") ~ "training",
+                                 release_date >= as.Date("2016-12-07") & release_date < as.Date("2020-06-17") ~ "validation",
+                                 release_date >= as.Date("2020-06-17") & release_date <= as.Date("2023-08-23") ~ "test",
+                                 release_date > as.Date("2023-08-23") ~ "published later")) %>% 
+  mutate(apegen_set = case_when(pdbid %in% apegen_pdbids ~ "template",
+                                !pdbid %in% apegen_pdbids ~ "nontemplate")) %>% 
+  mutate(af3_set = case_when(release_date <= as.Date("2021-09-30") ~ "training",
+                             release_date > as.Date("2021-09-30") ~ "test"))
+
+# further filtering the test set to eliminate any allele-peptide pairs from the test set that would be present in the training data ----------
+# this stricter filtering criteria was an idea by Balázs on the meeting on 9th July, 2026.
+# so far we filtered only based on the PDB IDs; instead of this now I will keep only those allele-peptide pairs that were not part of the training set
+setcols_unq <- c("mhcfine_set", "af3_set", "apegen_set")
+training_allele_pep_combs <- map(setcols_unq, \(crnt_col) {
+  pdbsdf %>% 
+    filter(!!as.symbol(crnt_col) %in% c("training", "template", "validation")) %>% 
+    mutate(allele.peptide = paste0(allele, ".", peptide)) %>% 
+    pull(allele.peptide)
+}) %>% set_names(setcols_unq)
+
+# there are a few allele-peptide combinations that are present in the training/validation/template sets, but also in the test
+# mhc-fine: 18 ent "published later"
+pdbsdf$mhcfine_test_combination <- pdbsdf %>%
+  mutate(allele.peptide = paste0(allele, ".", peptide)) %>%
+  pull(allele.peptide) %>% 
+  is.element(training_allele_pep_combs$mhcfine_set) %>% 
+  `!`()
+
+pdbsdf$apegen_test_combination <- pdbsdf %>%
+  mutate(allele.peptide = paste0(allele, ".", peptide)) %>%
+  pull(allele.peptide) %>% 
+  is.element(training_allele_pep_combs$apegen_set) %>% 
+  `!`()
+
+pdbsdf$af3_test_combination <- pdbsdf %>%
+  mutate(allele.peptide = paste0(allele, ".", peptide)) %>%
+  pull(allele.peptide) %>% 
+  is.element(training_allele_pep_combs$af3_set) %>% 
+  `!`()
+
+# MHC-fine: 1 structure grouped to test but had the same allele-pep combination in training
+table(combination_based_test = pdbsdf$mhcfine_test_combination,
+      pdb_based_test = pdbsdf$mhcfine_set %in% c("test", "published later"))
+
+# APE-Gen 2.0: Out of the 87 structures based on PDB IDs, 25 are really independent
+table(combination_based_test = pdbsdf$apegen_test_combination,
+      pdb_based_test = pdbsdf$apegen_set == c("nontemplate"))
+
+# AlphaFold3: 3 structure grouped to test but had the same allele-pep combination in training
+table(combination_based_test = pdbsdf$af3_test_combination,
+      pdb_based_test = pdbsdf$af3_set == "test")
+
+# creating a variant of the pdbsdf data frame for the manuscript showing the 77 pHLA complexes ---------
+pdbsdf_toexport <- pdbsdf %>% 
+  filter(mhcfine_test_combination) %>% 
+  dplyr::select(peptide, allele, pdbid, biol_assembly_id, release_date, rmsd_mhcfine) %>% 
+  set_colnames(c("Peptide", "Allele", "PDB identifier", "Biological assembly identifier", "Release date", "Peptide chain Cα RMSD (Å)")) %>% 
+  arrange(by = `Release date`)
+
+write.csv(pdbsdf_toexport, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_mhcfine_260703.csv", quote = F, row.names = FALSE)
+
+# creating a variant of the pdbsdf that has only those allele-peptide combinations that are forming an independent test set for all 3 methods -------
+pdbsdf_testonly <- pdbsdf %>% filter(mhcfine_test_combination & apegen_test_combination & af3_test_combination)
+
+# keeping single random entries of each pHLA complex -----------
+set.seed(1234)
+
+pdbsdf_testonly %<>% 
+  group_by(allele, peptide) %>% 
+  group_map(~.x[sample(1:nrow(.x), 1, replace = FALSE), ], .keep = TRUE) %>% 
+  do.call(rbind, .)
+
+pdb_files_experimental_testonly <- pdbsdf_testonly$pdb_file_experimental
+save(pdb_files_experimental_testonly, file = "data/dataset_preparation_1/pdb_files_experimental_testonly_all3methods.RData") # PDB file names for pHLAs that are test combinations for all three methods, and were used in the test sets
+
+# three-way paired plots ----------
+pdbsdf_testonly_molten <- pdbsdf_testonly %>% 
+  dplyr::select(pdb_file_experimental, rmsd_mhcfine, rmsd_apegen, rmsd_af3) %>% 
+  reshape2::melt()
+
+pval_friedman <- pdbsdf_testonly_molten %>%
+  rstatix::friedman_test(value ~ variable | pdb_file_experimental) %>% pull("p")
+
+(plt_threeway_benchmark <- pdbsdf_testonly %>% 
+    dplyr::select(pdb_file_experimental, rmsd_apegen, rmsd_mhcfine, rmsd_af3, allele) %>% 
+    reshape2::melt(id.vars = c("pdb_file_experimental", "allele")) %>% 
+    set_colnames(c("pdbid", "allele", "variable", "rmsd")) %>% 
+    ggplot(aes(x = variable, y = rmsd)) +
+    geom_boxplot() +
+    geom_point() +
+    geom_line(aes(group = pdbid))  +
+    annotate("text", x = 2, y = 2,
+             label = PrettyPvalues(pval_friedman), parse = TRUE, hjust = 0.5) +
+    scale_x_discrete(limits = c("rmsd_mhcfine", "rmsd_af3", "rmsd_apegen"), labels = c("MHC-Fine", "AlphaFold 3", "APE-Gen 2.0")) +
+    theme_classic() +
+    ylim(c(0.25, 2)) +
+    ylab(expression(RMSD[Cα]~(Å))) +
+    xlab(NULL))
+
+c(pdbsdf_testonly$rmsd_mhcfine %>% median,
+  pdbsdf_testonly$rmsd_af3 %>% median,
+  pdbsdf_testonly$rmsd_apegen %>% median)
+
+# checking the median RMSD for MHC-fine ----------
+# but first I will perform a random choice for each duplicate entries
+set.seed(1234)
+pdbsdf_mhcfine_test_randselected <- pdbsdf %>%
+  filter(mhcfine_test_combination) %>% 
+  filter(!paste0(allele, ".", peptide) %in% paste0(pdbsdf_testonly$allele, ".", pdbsdf_testonly$peptide)) %>%
+  filter(!pdb_file_experimental %in% pdbsdf_testonly$pdb_file_experimental) %>%
+  group_by(allele, peptide) %>%
+  group_map(~.x[sample(1:nrow(.x), 1, replace = FALSE), ], .keep = TRUE) %>%
+  do.call(rbind, .)
+
+pdbsdf <- rbind(pdbsdf %>% filter(pdb_file_experimental %in% pdbsdf_testonly$pdb_file_experimental),
+                pdbsdf_mhcfine_test_randselected)
+
+pdb_files_experimental_mhcfine_test <- pdbsdf_mhcfine_test_randselected$pdb_file_experimental
+save(pdb_files_experimental_mhcfine_test, file = "data/dataset_preparation_1/pdb_files_experimental_mhcfine_test.RData") # PDB file names for pHLAs that are test combinations for MHC-Fine, and were used in the test sets
+
+load("data/dataset_preparation_1/pdb_files_experimental_testonly_all3methods.RData")
+load("data/dataset_preparation_1/pdb_files_experimental_mhcfine_test.RData")
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  median
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  Rfast::min_max()
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  is_less_than(1) %>%
+  sum
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  is_less_than(1) %>%
+  mean
+
+# identifying the worst and the best predicted sturctures for 3D structure visualization ---------
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>% 
+  group_by(allele) %>% 
+  group_map(~.x %>% filter(rmsd_mhcfine == min(rmsd_mhcfine) | rmsd_mhcfine == max(rmsd_mhcfine))) %>% do.call(rbind, .)
+```
+
+## Backbone heavy atom RMSD
+In the next code chunk we will perform the same benchmark analyses, but using an RMSD metric focusing on heavy atoms from the peptide backbone:
+
+```{r}
+# pdbsdf_mhcfine <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_mhcfine_260703.RData")[[1]]
+# pdbsdf_apegen <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_apegen_260706.RData")[[1]]
+# pdbsdf_af3 <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_alphafold3_260707.RData")[[1]]
+# 
+# pdbsdf <- pdbsdf_mhcfine %>%
+#   dplyr::rename(pdb_path_predicted_mhcfine = pdb_path_predicted,
+#                 pdb_path_experimental_mhcfine = pdb_path_experimental) %>%
+#   left_join(pdbsdf_apegen %>%
+#               dplyr::rename(pdb_path_predicted_apegen = pdb_path_predicted,
+#                             pdb_path_experimental_apegen = pdb_path_experimental) %>%
+#               dplyr::select(pdbid, biol_assembly_id, allele, peptide, pdb_path_predicted_apegen, pdb_path_experimental_apegen),
+#             by = c("pdbid", "biol_assembly_id", "allele", "peptide")) %>%
+#   left_join(pdbsdf_af3 %>%
+#               dplyr::rename(pdb_path_predicted_af3 = pdb_path_predicted,
+#                             pdb_path_experimental_af3 = pdb_path_experimental) %>%
+#               dplyr::select(pdbid, biol_assembly_id, allele, peptide, pdb_path_predicted_af3, pdb_path_experimental_af3),
+#             by = c("pdbid", "biol_assembly_id", "allele", "peptide"))
+# 
+# pdbsdf %<>%
+#   mutate(pdb_path_experimental_mhcfine_aligned = pdb_path_experimental_mhcfine %>%
+#            gsub("pdb_files_experimental_separated", "pdb_files_experimental_separated_aligned", .),
+#          pdb_path_experimental_apegen_aligned = pdb_path_experimental_apegen %>%
+#            gsub("pdb_files_experimental_separated", "pdb_files_experimental_separated_aligned_a12only_apegen", .),
+#          pdb_path_experimental_af3_aligned = pdb_path_experimental_apegen %>%
+#            gsub("pdb_files_experimental_separated", "pdb_files_experimental_separated_pdb_aligned_a1a2only_alphafold3", .))
+# pdbsdf$pdb_path_experimental_apegen_aligned %<>% gsub("260703", "260706", .)
+# pdbsdf$pdb_path_predicted_apegen %<>% gsub("260703", "260706", .)
+# pdbsdf$pdb_path_experimental_af3_aligned %<>% gsub("260703", "260707", .)
+# 
+# pdbsdf$rmsd_mhcfine <- pmap_dbl(list(pdbsdf$pdb_path_experimental_mhcfine_aligned,
+#                                      pdbsdf$pdb_path_predicted_mhcfine,
+#                                      pdbsdf$pep_chain_id),
+#                                 \(crnt_path_exp = ..1, crnt_path_pred = ..2, crnt_pepchain_exp = ..3) {
+#                                   quietly(RMSD.pdb)(x = crnt_path_exp,
+#                                                     y = crnt_path_pred,
+#                                                     path_input = TRUE,
+#                                                     fit = FALSE,
+#                                                     elety = c("N", "CA", "C", "O"),
+#                                                     chain_x = crnt_pepchain_exp,
+#                                                     chain_y = "B")$result
+#                                 }, .progress = T)
+# 
+# pdbsdf$rmsd_apegen <- pmap_dbl(list(pdbsdf$pdb_path_experimental_apegen_aligned,
+#                                     pdbsdf$pdb_path_predicted_apegen,
+#                                     pdbsdf$pep_chain_id),
+#                                \(crnt_path_exp = ..1, crnt_path_pred = ..2, crnt_pepchain_exp = ..3) {
+#                                  quietly(RMSD.pdb)(x = crnt_path_exp,
+#                                                    y = crnt_path_pred,
+#                                                    path_input = TRUE,
+#                                                    fit = FALSE,
+#                                                    elety = c("N", "CA", "C", "O"),
+#                                                    chain_x = crnt_pepchain_exp,
+#                                                    chain_y = "C")$result
+#                                }, .progress = T)
+# 
+# pdbsdf$rmsd_af3 <- pmap_dbl(list(pdbsdf$pdb_path_experimental_af3_aligned,
+#                                  pdbsdf$pdb_path_predicted_af3,
+#                                  pdbsdf$pep_chain_id),
+#                             \(crnt_path_exp = ..1, crnt_path_pred = ..2, crnt_pepchain_exp = ..3) {
+#                               quietly(RMSD.pdb)(x = crnt_path_exp,
+#                                                 y = crnt_path_pred,
+#                                                 path_input = TRUE,
+#                                                 fit = FALSE,
+#                                                 elety = c("N", "CA", "C", "O"),
+#                                                 chain_x = crnt_pepchain_exp,
+#                                                 chain_y = "B")$result
+#                             }, .progress = T)
+# 
+# save(pdbsdf, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_all3methods_heavybackbone_benchmark_260703.RData")
+
+load("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_all3methods_heavybackbone_benchmark_260703.RData")
+
+# adding training/validation/test set assignments ------------
+datesdf <- read.csv("data/dataset_preparation_1/rcsb_pdb_custom_report_20260703113152.csv", header = TRUE, skip = 1)
+# apegen_pdbids <- list.files("~/Programok/APE-Gen2.0/new_templates_final") %>% gsub("\\.pdb", "", .) # the ones ApeGen fits the peptides to
+# save(apegen_pdbids, file = "data/dataset_preparation_1/apegen_template_pdbids.RData")
+load("data/dataset_preparation_1/apegen_template_pdbids.RData")
+
+pdbsdf %<>% 
+  mutate(release_date = datesdf$Release.Date[fmatch(pdbid, datesdf$Entry.ID)] %>% as.Date) %>% 
+  mutate(mhcfine_set = case_when(release_date < as.Date("2016-12-07") ~ "training",
+                                 release_date >= as.Date("2016-12-07") & release_date < as.Date("2020-06-17") ~ "validation",
+                                 release_date >= as.Date("2020-06-17") & release_date <= as.Date("2023-08-23") ~ "test",
+                                 release_date > as.Date("2023-08-23") ~ "published later")) %>% 
+  mutate(apegen_set = case_when(pdbid %in% apegen_pdbids ~ "template",
+                                !pdbid %in% apegen_pdbids ~ "nontemplate")) %>% 
+  mutate(af3_set = case_when(release_date <= as.Date("2021-09-30") ~ "training",
+                             release_date > as.Date("2021-09-30") ~ "test"))
+
+# further filtering the test set to eliminate any allele-peptide pairs from the test set that would be present in the training data ----------
+# this stricter filtering criteria was an idea by Balázs on the meeting on 9th July, 2026.
+# so far we filtered only based on the PDB IDs; instead of this now I will keep only those allele-peptide pairs that were not part of the training set
+setcols_unq <- c("mhcfine_set", "af3_set", "apegen_set")
+training_allele_pep_combs <- map(setcols_unq, \(crnt_col) {
+  pdbsdf %>% 
+    filter(!!as.symbol(crnt_col) %in% c("training", "template", "validation")) %>% 
+    mutate(allele.peptide = paste0(allele, ".", peptide)) %>% 
+    pull(allele.peptide)
+}) %>% set_names(setcols_unq)
+
+# there are a few allele-peptide combinations that are present in the training/validation/template sets, but also in the test
+# mhc-fine: 18 ent "published later"
+pdbsdf$mhcfine_test_combination <- pdbsdf %>%
+  mutate(allele.peptide = paste0(allele, ".", peptide)) %>%
+  pull(allele.peptide) %>% 
+  is.element(training_allele_pep_combs$mhcfine_set) %>% 
+  `!`()
+
+pdbsdf$apegen_test_combination <- pdbsdf %>%
+  mutate(allele.peptide = paste0(allele, ".", peptide)) %>%
+  pull(allele.peptide) %>% 
+  is.element(training_allele_pep_combs$apegen_set) %>% 
+  `!`()
+
+pdbsdf$af3_test_combination <- pdbsdf %>%
+  mutate(allele.peptide = paste0(allele, ".", peptide)) %>%
+  pull(allele.peptide) %>% 
+  is.element(training_allele_pep_combs$af3_set) %>% 
+  `!`()
+
+# MHC-fine: 1 structure grouped to test but had the same allele-pep combination in training
+table(combination_based_test = pdbsdf$mhcfine_test_combination,
+      pdb_based_test = pdbsdf$mhcfine_set %in% c("test", "published later"))
+
+# APE-Gen 2.0: Out of the 87 structures based on PDB IDs, 25 are really independent
+table(combination_based_test = pdbsdf$apegen_test_combination,
+      pdb_based_test = pdbsdf$apegen_set == c("nontemplate"))
+
+# AlphaFold3: 3 structure grouped to test but had the same allele-pep combination in training
+table(combination_based_test = pdbsdf$af3_test_combination,
+      pdb_based_test = pdbsdf$af3_set == "test")
+
+# creating a variant of the pdbsdf data frame for the manuscript showing the 77 pHLA complexes ---------
+pdbsdf_toexport <- pdbsdf %>% 
+  filter(mhcfine_test_combination) %>% 
+  dplyr::select(peptide, allele, pdbid, biol_assembly_id, release_date, rmsd_mhcfine) %>% 
+  set_colnames(c("Peptide", "Allele", "PDB identifier", "Biological assembly identifier", "Release date", "Peptide chain heavy backbone atom RMSD (Å)")) %>% 
+  arrange(by = `Release date`)
+
+write.csv(pdbsdf_toexport, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_heavybackbone_mhcfine_260703.csv", quote = F, row.names = FALSE)
+
+# creating a variant of the pdbsdf that has only those allele-peptide combinations that are forming an independent test set for all 3 methods -------
+pdbsdf_testonly <- pdbsdf %>% filter(mhcfine_test_combination & apegen_test_combination & af3_test_combination)
+
+# keeping single random entries of each pHLA complex -----------
+set.seed(1234)
+
+pdbsdf_testonly %<>% 
+  group_by(allele, peptide) %>% 
+  group_map(~.x[sample(1:nrow(.x), 1, replace = FALSE), ], .keep = TRUE) %>% 
+  do.call(rbind, .)
+
+# three-way paired plots ----------
+pdbsdf_testonly_molten <- pdbsdf_testonly %>% 
+  dplyr::select(pdb_file_experimental, rmsd_mhcfine, rmsd_apegen, rmsd_af3) %>% 
+  reshape2::melt()
+
+pval_friedman <- pdbsdf_testonly_molten %>% rstatix::friedman_test(value ~ variable | pdb_file_experimental) %>% pull("p")
+pvals_friedman_conover <- PMCMRplus::frdAllPairsConoverTest(y = pdbsdf_testonly_molten$value,
+                                                            groups = pdbsdf_testonly_molten$variable,
+                                                            blocks = pdbsdf_testonly_molten$pdb_file_experimental)
+
+conover_p_mhcfine_apegen <- pvals_friedman_conover$p.value["rmsd_apegen", "rmsd_mhcfine"]
+conover_p_mhcfine_af3 <- pvals_friedman_conover$p.value["rmsd_af3", "rmsd_mhcfine"]
+conover_p_apegen_af3 <- pvals_friedman_conover$p.value["rmsd_af3", "rmsd_apegen"]
+
+(plt_threeway_benchmark_heavybackbone <- pdbsdf_testonly %>% 
+    dplyr::select(pdb_file_experimental, rmsd_apegen, rmsd_mhcfine, rmsd_af3, allele) %>% 
+    reshape2::melt(id.vars = c("pdb_file_experimental", "allele")) %>% 
+    set_colnames(c("pdbid", "allele", "variable", "rmsd")) %>% 
+    ggplot(aes(x = variable, y = rmsd)) +
+    geom_boxplot() +
+    geom_point() +
+    geom_line(aes(group = pdbid))  +
+    scale_x_discrete(limits = c("rmsd_mhcfine", "rmsd_af3", "rmsd_apegen"), labels = c("MHC-Fine", "AlphaFold 3", "APE-Gen 2.0")) +
+    annotate("text", x = 2, y = 2,
+             label = PrettyPvalues(pval_friedman), parse = TRUE, hjust = 0.5) +
+    ylim(c(0.25, 2)) +
+    theme_classic() +
+    ylab(expression(RMSD[bb-heavy]~(Å))) +
+    xlab(NULL))
+
+c(pdbsdf_testonly$rmsd_mhcfine %>% median,
+  pdbsdf_testonly$rmsd_af3 %>% median,
+  pdbsdf_testonly$rmsd_apegen %>% median)
+
+# checking the median RMSD for MHC-fine ----------
+load("data/dataset_preparation_1/pdb_files_experimental_testonly_all3methods.RData")
+load("data/dataset_preparation_1/pdb_files_experimental_mhcfine_test.RData")
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  median
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  Rfast::min_max()
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  is_less_than(1) %>%
+  sum
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  is_less_than(1) %>%
+  mean
+```
+
+Situation is similar: MHC-Fine and AlphaFold3 are in a similar range, APE-Gen seems to be weaker.
+
+## All heavy atom RMSD
+Here, I created a custom version of the RMSD.pdb function, as there are mismatches between the atoms found in the predicted structures vs. the in vitro one. To tackle this problem, I create a unique identifier for each atom (ids_x and ids_y variables inside the function) that can be used for matching each component of each amino acid. Consequently, the all-heavy-atom RMSD calculations could be performed.
+
+Result: MHC-fine and AlphaFold3 is capable of predicting structure with similar accuracy, APE-Gen 2.0 shows significantly higher degrees of deviation.
+
+```{r}
+# defining an RMSD.pdb.allheavy function ----------
+RMSD.pdb.allheavy <- function(x, y, path_input = TRUE, fit = TRUE, elety = NULL, type = NULL, string = NULL, chain_x = NULL, chain_y = NULL) {
+  if(path_input){
+    pdbobj_x <- bio3d::read.pdb(x)
+    pdbobj_y <- bio3d::read.pdb(y)
+  } else {
+    pdbobj_x <- x
+    pdbobj_y <- y
+  }
+  
+  if(!is.null(string)) {
+    pdbobj_x <- bio3d::trim.pdb(pdbobj_x, bio3d::atom.select(pdbobj_x, elety = elety, chain = chain_x, type = type, string = string))
+    pdbobj_y <- bio3d::trim.pdb(pdbobj_y, bio3d::atom.select(pdbobj_y, elety = elety, chain = chain_y, type = type, string = string))
+  }
+  
+  ids_x <- paste(pdbobj_x$atom$resno, pdbobj_x$atom$resid, pdbobj_x$atom$elety, sep = "_")
+  ids_y <- paste(pdbobj_y$atom$resno, pdbobj_y$atom$resid, pdbobj_y$atom$elety, sep = "_")
+  
+  # find common atom identifiers present in both structures
+  common_ids <- intersect(ids_x, ids_y)
+  
+  # filter indices matching only the common set of atoms
+  matched_idx_x <- match(common_ids, ids_x)
+  matched_idx_y <- match(common_ids, ids_y)
+  
+  # extract XYZ coordinates for the matched atoms
+  xyz_x <- pdbobj_x$xyz[atom2xyz(matched_idx_x)]
+  xyz_y <- pdbobj_y$xyz[atom2xyz(matched_idx_y)]
+  
+  rmsd_val <- rmsd(a = xyz_x, b = xyz_y)
+  return(rmsd_val)
+}
+
+# # performing analyses below ---------
+# pdbsdf_mhcfine <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_mhcfine_260703.RData")[[1]]
+# pdbsdf_apegen <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_apegen_260706.RData")[[1]]
+# pdbsdf_af3 <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_alphafold3_260707.RData")[[1]]
+# 
+# pdbsdf <- pdbsdf_mhcfine %>%
+#   dplyr::rename(pdb_path_predicted_mhcfine = pdb_path_predicted,
+#                 pdb_path_experimental_mhcfine = pdb_path_experimental) %>%
+#   left_join(pdbsdf_apegen %>%
+#               dplyr::rename(pdb_path_predicted_apegen = pdb_path_predicted,
+#                             pdb_path_experimental_apegen = pdb_path_experimental) %>%
+#               dplyr::select(pdbid, biol_assembly_id, allele, peptide, pdb_path_predicted_apegen, pdb_path_experimental_apegen),
+#             by = c("pdbid", "biol_assembly_id", "allele", "peptide")) %>%
+#   left_join(pdbsdf_af3 %>%
+#               dplyr::rename(pdb_path_predicted_af3 = pdb_path_predicted,
+#                             pdb_path_experimental_af3 = pdb_path_experimental) %>%
+#               dplyr::select(pdbid, biol_assembly_id, allele, peptide, pdb_path_predicted_af3, pdb_path_experimental_af3),
+#             by = c("pdbid", "biol_assembly_id", "allele", "peptide"))
+# 
+# pdbsdf %<>%
+#   mutate(pdb_path_experimental_mhcfine_aligned = pdb_path_experimental_mhcfine %>%
+#            gsub("pdb_files_experimental_separated", "pdb_files_experimental_separated_aligned", .),
+#          pdb_path_experimental_apegen_aligned = pdb_path_experimental_apegen %>%
+#            gsub("pdb_files_experimental_separated", "pdb_files_experimental_separated_aligned_a12only_apegen", .),
+#          pdb_path_experimental_af3_aligned = pdb_path_experimental_apegen %>%
+#            gsub("pdb_files_experimental_separated", "pdb_files_experimental_separated_pdb_aligned_a1a2only_alphafold3", .))
+# pdbsdf$pdb_path_experimental_apegen_aligned %<>% gsub("260703", "260706", .)
+# pdbsdf$pdb_path_predicted_apegen %<>% gsub("260703", "260706", .)
+# pdbsdf$pdb_path_experimental_af3_aligned %<>% gsub("260703", "260707", .)
+# 
+# 
+# crnt_path_exp <- pdbsdf$pdb_path_experimental_af3_aligned[1]
+# crnt_path_pred <- pdbsdf$pdb_path_predicted_af3[1]
+# crnt_pepchain_exp <- pdbsdf$pep_chain_id[1]
+# 
+# pdbsdf$rmsd_mhcfine <- pmap_dbl(list(pdbsdf$pdb_path_experimental_mhcfine_aligned,
+#                                      pdbsdf$pdb_path_predicted_mhcfine,
+#                                      pdbsdf$pep_chain_id),
+#                                 \(crnt_path_exp = ..1, crnt_path_pred = ..2, crnt_pepchain_exp = ..3) {
+#                                   quietly(RMSD.pdb.allheavy)(x = crnt_path_exp,
+#                                                              y = crnt_path_pred,
+#                                                              path_input = TRUE,
+#                                                              fit = FALSE,
+#                                                              string = "noh",
+#                                                              chain_x = crnt_pepchain_exp,
+#                                                              chain_y = "B")$result
+#                                 }, .progress = T)
+# 
+# pdbsdf$rmsd_apegen <- pmap_dbl(list(pdbsdf$pdb_path_experimental_apegen_aligned,
+#                                     pdbsdf$pdb_path_predicted_apegen,
+#                                     pdbsdf$pep_chain_id),
+#                                \(crnt_path_exp = ..1, crnt_path_pred = ..2, crnt_pepchain_exp = ..3) {
+#                                  quietly(RMSD.pdb.allheavy)(x = crnt_path_exp,
+#                                                             y = crnt_path_pred,
+#                                                             path_input = TRUE,
+#                                                             fit = FALSE,
+#                                                             string = "noh",
+#                                                             chain_x = crnt_pepchain_exp,
+#                                                             chain_y = "C")$result
+#                                }, .progress = T)
+# 
+# pdbsdf$pdb_path_experimental_af3_aligned[1] -> crnt_path_exp
+# pdbsdf$pdb_path_predicted_af3[1] -> crnt_path_pred
+# pdbsdf$pep_chain_id[1] -> crnt_pepchain_exp
+# 
+# pdbsdf$rmsd_af3 <- pmap_dbl(list(pdbsdf$pdb_path_experimental_af3_aligned,
+#                                  pdbsdf$pdb_path_predicted_af3,
+#                                  pdbsdf$pep_chain_id),
+#                             \(crnt_path_exp = ..1, crnt_path_pred = ..2, crnt_pepchain_exp = ..3) {
+#                               quietly(RMSD.pdb.allheavy)(x = crnt_path_exp,
+#                                                          y = crnt_path_pred,
+#                                                          path_input = TRUE,
+#                                                          fit = FALSE,
+#                                                          string = "noh",
+#                                                          chain_x = crnt_pepchain_exp,
+#                                                          chain_y = "B")$result
+#                             }, .progress = T)
+# 
+# save(pdbsdf, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_all3methods_allheavyatom_benchmark_260703.RData")
+
+pdbsdf <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_all3methods_allheavyatom_benchmark_260703.RData")[[1]]
+
+# adding training/validation/test set assignments ------------
+datesdf <- read.csv("data/dataset_preparation_1/rcsb_pdb_custom_report_20260703113152.csv", header = TRUE, skip = 1)
+# apegen_pdbids <- list.files("~/Programok/APE-Gen2.0/new_templates_final") %>% gsub("\\.pdb", "", .) # the ones ApeGen fits the peptides to
+# save(apegen_pdbids, file = "data/dataset_preparation_1/apegen_template_pdbids.RData")
+load("data/dataset_preparation_1/apegen_template_pdbids.RData")
+
+pdbsdf %<>% 
+  mutate(release_date = datesdf$Release.Date[fmatch(pdbid, datesdf$Entry.ID)] %>% as.Date) %>% 
+  mutate(mhcfine_set = case_when(release_date < as.Date("2016-12-07") ~ "training",
+                                 release_date >= as.Date("2016-12-07") & release_date < as.Date("2020-06-17") ~ "validation",
+                                 release_date >= as.Date("2020-06-17") & release_date <= as.Date("2023-08-23") ~ "test",
+                                 release_date > as.Date("2023-08-23") ~ "published later")) %>% 
+  mutate(apegen_set = case_when(pdbid %in% apegen_pdbids ~ "template",
+                                !pdbid %in% apegen_pdbids ~ "nontemplate")) %>% 
+  mutate(af3_set = case_when(release_date <= as.Date("2021-09-30") ~ "training",
+                             release_date > as.Date("2021-09-30") ~ "test"))
+
+# further filtering the test set to eliminate any allele-peptide pairs from the test set that would be present in the training data ----------
+# this stricter filtering criteria was an idea by Balázs on the meeting on 9th July, 2026.
+# so far we filtered only based on the PDB IDs; instead of this now I will keep only those allele-peptide pairs that were not part of the training set
+setcols_unq <- c("mhcfine_set", "af3_set", "apegen_set")
+training_allele_pep_combs <- map(setcols_unq, \(crnt_col) {
+  pdbsdf %>% 
+    filter(!!as.symbol(crnt_col) %in% c("training", "template", "validation")) %>% 
+    mutate(allele.peptide = paste0(allele, ".", peptide)) %>% 
+    pull(allele.peptide)
+}) %>% set_names(setcols_unq)
+
+# there are a few allele-peptide combinations that are present in the training/validation/template sets, but also in the test
+# mhc-fine: 18 ent "published later"
+pdbsdf$mhcfine_test_combination <- pdbsdf %>%
+  mutate(allele.peptide = paste0(allele, ".", peptide)) %>%
+  pull(allele.peptide) %>% 
+  is.element(training_allele_pep_combs$mhcfine_set) %>% 
+  `!`()
+
+pdbsdf$apegen_test_combination <- pdbsdf %>%
+  mutate(allele.peptide = paste0(allele, ".", peptide)) %>%
+  pull(allele.peptide) %>% 
+  is.element(training_allele_pep_combs$apegen_set) %>% 
+  `!`()
+
+pdbsdf$af3_test_combination <- pdbsdf %>%
+  mutate(allele.peptide = paste0(allele, ".", peptide)) %>%
+  pull(allele.peptide) %>% 
+  is.element(training_allele_pep_combs$af3_set) %>% 
+  `!`()
+
+# MHC-fine: 1 structure grouped to test but had the same allele-pep combination in training
+table(combination_based_test = pdbsdf$mhcfine_test_combination,
+      pdb_based_test = pdbsdf$mhcfine_set %in% c("test", "published later"))
+
+# APE-Gen 2.0: Out of the 87 structures based on PDB IDs, 25 are really independent
+table(combination_based_test = pdbsdf$apegen_test_combination,
+      pdb_based_test = pdbsdf$apegen_set == c("nontemplate"))
+
+# AlphaFold3: 3 structure grouped to test but had the same allele-pep combination in training
+table(combination_based_test = pdbsdf$af3_test_combination,
+      pdb_based_test = pdbsdf$af3_set == "test")
+
+# creating a variant of the pdbsdf data frame for the manuscript showing the 77 pHLA complexes ---------
+pdbsdf_toexport <- pdbsdf %>% 
+  filter(mhcfine_test_combination) %>% 
+  dplyr::select(peptide, allele, pdbid, biol_assembly_id, release_date, rmsd_mhcfine) %>% 
+  set_colnames(c("Peptide", "Allele", "PDB identifier", "Biological assembly identifier", "Release date", "Peptide chain all heavy atom RMSD (Å)")) %>% 
+  arrange(by = `Release date`)
+
+write.csv(pdbsdf_toexport, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_allheavyatom_mhcfine_260703.csv", quote = F, row.names = FALSE)
+
+# creating a variant of the pdbsdf that has only those allele-peptide combinations that are forming an independent test set for all 3 methods -------
+pdbsdf_testonly <- pdbsdf %>% filter(mhcfine_test_combination & apegen_test_combination & af3_test_combination)
+
+# keeping single random entries of each pHLA complex -----------
+set.seed(1234)
+
+pdbsdf_testonly %<>% 
+  group_by(allele, peptide) %>% 
+  group_map(~.x[sample(1:nrow(.x), 1, replace = FALSE), ], .keep = TRUE) %>% 
+  do.call(rbind, .)
+
+# three-way paired plots ----------
+pdbsdf_testonly_molten <- pdbsdf_testonly %>% 
+  dplyr::select(pdb_file_experimental, rmsd_mhcfine, rmsd_apegen, rmsd_af3) %>% 
+  reshape2::melt()
+
+pval_friedman <- pdbsdf_testonly_molten %>% rstatix::friedman_test(value ~ variable | pdb_file_experimental) %>% pull("p")
+pvals_friedman_conover <- PMCMRplus::frdAllPairsConoverTest(y = pdbsdf_testonly_molten$value,
+                                                            groups = pdbsdf_testonly_molten$variable,
+                                                            blocks = pdbsdf_testonly_molten$pdb_file_experimental)
+
+conover_p_mhcfine_apegen <- pvals_friedman_conover$p.value["rmsd_apegen", "rmsd_mhcfine"]
+conover_p_mhcfine_af3 <- pvals_friedman_conover$p.value["rmsd_af3", "rmsd_mhcfine"]
+conover_p_apegen_af3 <- pvals_friedman_conover$p.value["rmsd_af3", "rmsd_apegen"]
+
+(plt_threeway_benchmark_allheavyatom <- pdbsdf_testonly %>% 
+    dplyr::select(pdb_file_experimental, rmsd_apegen, rmsd_mhcfine, rmsd_af3, allele) %>% 
+    reshape2::melt(id.vars = c("pdb_file_experimental", "allele")) %>% 
+    set_colnames(c("pdbid", "allele", "variable", "rmsd")) %>% 
+    ggplot(aes(x = variable, y = rmsd)) +
+    geom_boxplot() +
+    geom_point() +
+    geom_line(aes(group = pdbid))  +
+    annotate("text", x = 2, y = 4.5,
+             label = PrettyPvalues(pval_friedman), parse = TRUE, hjust = 0.5) +
+    scale_x_discrete(limits = c("rmsd_mhcfine", "rmsd_af3", "rmsd_apegen"), labels = c("MHC-Fine", "AlphaFold 3", "APE-Gen 2.0")) +
+    theme_classic() +
+    ylab(expression(RMSD[all~heavy~atom]~(Å))) +
+    xlab(NULL))
+
+c(pdbsdf_testonly$rmsd_apegen %>% median,
+  pdbsdf_testonly$rmsd_mhcfine %>% median,
+  pdbsdf_testonly$rmsd_af3 %>% median)
+
+# checking the median RMSD for MHC-fine ----------
+load("data/dataset_preparation_1/pdb_files_experimental_testonly_all3methods.RData")
+load("data/dataset_preparation_1/pdb_files_experimental_mhcfine_test.RData")
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  median
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  Rfast::min_max()
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  is_less_than(1) %>%
+  sum
+
+pdbsdf %>%
+  filter(pdb_file_experimental %in% c(pdb_files_experimental_mhcfine_test, pdb_files_experimental_testonly)) %>%
+  pull(rmsd_mhcfine) %>%
+  is_less_than(1) %>%
+  mean
+```
+
+## Assembling the final plot and the MHC-Fine test set table
+```{r}
+# final plot ----------
+png("data/dataset_preparation_1/fig_threeway_benchmark_all.png", width = 159.2, height = 100, units = "mm", res = 300)
+cowplot::plot_grid(plt_threeway_benchmark + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+                   plt_threeway_benchmark_heavybackbone + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+                   plt_threeway_benchmark_allheavyatom + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)), nrow = 1, labels = c("A", "B", "C"))
+dev.off()
+
+# MHC-Fine test set table ----------
+load("data/dataset_preparation_1/pdb_files_experimental_testonly_all3methods.RData")
+load("data/dataset_preparation_1/pdb_files_experimental_mhcfine_test.RData")
+
+pdbsdf_ca <- read.csv("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_mhcfine_260703.csv") %>%
+  mutate(pdb_file_experimental = paste0(PDB.identifier, "_", Biological.assembly.identifier, ".pdb"))
+pdbsdf_bbheavy <- read.csv("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_heavybackbone_mhcfine_260703.csv") %>%
+  mutate(pdb_file_experimental = paste0(PDB.identifier, "_", Biological.assembly.identifier, ".pdb"))
+pdbsdf_allheavy <- read.csv("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_allheavyatom_mhcfine_260703.csv") %>%
+  mutate(pdb_file_experimental = paste0(PDB.identifier, "_", Biological.assembly.identifier, ".pdb"))
+
+pdbsdf_all <- pdbsdf_ca %>%
+  left_join(pdbsdf_bbheavy %>% dplyr::select(Peptide.chain.heavy.backbone.atom.RMSD..Å., pdb_file_experimental),
+            by = "pdb_file_experimental") %>%
+  left_join(pdbsdf_allheavy %>% dplyr::select(Peptide.chain.all.heavy.atom.RMSD..Å., pdb_file_experimental),
+            by = "pdb_file_experimental") %>% 
+  
+  mutate(`Test set` = case_when(pdb_file_experimental %in% pdb_files_experimental_mhcfine_test ~ "MHC-Fine",
+                                pdb_file_experimental %in% pdb_files_experimental_testonly ~ "All 3 methods")) %>% 
+  dplyr::select(-pdb_file_experimental) %>% 
+  set_colnames(c("Peptide", "Allele", "PDB identifier", "Biological assembly identifier", "Release date", "Peptide Cα RMSD (Å)", "Peptide bbheavy RMSD (Å)", "Peptide all heavy atom RMSD (Å)", "Test set"))
+  
+write.csv(pdbsdf_all, file = "data/dataset_preparation_1/pdbsdf_experimental_and_predicted_final_mhcfine_260703.csv", quote = FALSE, row.names = FALSE)
+```
+
+# ANALYSIS! Creating the 3D structures for best and worst predicted structures
+```{r}
+# system("pymol fig_3dstructures_pymol_script_a0201.pml") # creating the 3D structure figures
+# system("pymol fig_3dstructures_pymol_script_a2402.pml") # creating the 3D structure figures
+
+library(magick)
+img_a2402_worst <- image_read("data/dataset_preparation_1/7JYW_1_TYQWIIRNW.png") %>% image_trim() %>% rasterGrob(interpolate = TRUE) # A2402, worst
+img_a2402_best <- image_read("data/dataset_preparation_1/7JYV_1_YLQPRTFLL.png") %>% image_trim() %>% rasterGrob(interpolate = TRUE) # A2402, best
+
+img_a0201_worst <- image_read("data/dataset_preparation_1/7UM2_1_TIADYNYKL.png") %>% image_trim() %>% rasterGrob(interpolate = TRUE) # A0201, worst
+img_a0201_best <- image_read("data/dataset_preparation_1/7KGO_1_ILLNKHIDA.png") %>% image_trim() %>% rasterGrob(interpolate = TRUE) # A0201, best
+
+fig3d_A <- ggplot() +
+  annotation_custom(img_a0201_best, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  theme_void() +
+  theme(plot.margin = margin(0,0,0,0))
+fig3d_B <- ggplot() +
+  annotation_custom(img_a0201_worst, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  theme_void() +
+  theme(plot.margin = margin(0,0,0,0))
+fig3d_C <- ggplot() +
+  annotation_custom(img_a2402_best, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  theme_void() +
+  theme(plot.margin = margin(0,0,0,0))
+fig3d_D <- ggplot() +
+  annotation_custom(img_a2402_worst, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  theme_void() +
+  theme(plot.margin = margin(0,0,0,0))
+
+library(cowplot)
+plt_ready <- ggdraw() +
+  draw_plot(fig3d_A, x = 0, y = 0, width = 0.5, height = 0.48) +
+  draw_plot(fig3d_B, x = .5, y = 0, width = 0.5, height = 0.48) +
+  draw_plot(fig3d_C, x = 0, y = .5, width = 0.5, height = 0.48) +
+  draw_plot(fig3d_D, x = .5, y = .5, width = 0.5, height = 0.48) +
+  draw_plot_label(label = c("A", "B", "C", "D"), size = 15,
+                  x = c(0, 0.5, 0, 0.5),
+                  y = c(1, 1, 0.5, 0.5))
+
+png("data/dataset_preparation_1/fig3d_all.png", width = 159.2, height = 180, units = "mm", res = 300)
+plt_ready
+dev.off()
+```
+
+# ANALYSIS! Evaluating how well BLOSUM62 covers conformational differences
+## C-alpha RMSD
+```{r}
+# # creating PDB pairs ----------
+# pdbsdf <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_mhcfine_260703.RData")[[1]]
+# pdbsdf %<>% filter(allele %in% c("A0201", "A2402")) # eliminating C0401 as it had only a single experimental structure
+# 
+# # selecting a common reference pHLA for A0201 to align everything else to -----------
+# outdir = "data/dataset_preparation_1/pdb_files_experimental_separated_alignedtoref_260703/"
+# dir.create(outdir)
+# pdbsdf_a0201 <- pdbsdf %>% filter(allele == "A0201")
+# pdbsdf_a2402 <- pdbsdf %>% filter(allele == "A2402")
+# 
+# pdb_ref_a0201 <- pdbsdf_a0201 %>% pull(pdb_file_experimental) %>% head(1) # 7RTD_1
+# pdb_ref_a2402 <- pdbsdf_a2402 %>% pull(pdb_file_experimental) %>% head(1) # 7MJA_1
+# 
+# for(i in 1:nrow(pdbsdf_a0201)) {
+#   crnt_pdb <- pdbsdf_a0201$pdb_file_experimental[i]
+#   message(Sys.time(), " - ", i, " - ", crnt_pdb)
+#   pymol.align(pdbpath_ref = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_aligned_260703/", pdb_ref_a0201),
+#               pdbpath_target = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_aligned_260703/", crnt_pdb),
+#               outpath = paste0(outdir, crnt_pdb),
+#               alpha_chain_ref = pdbsdf_a0201$alpha_chain_id[1],
+#               alpha_chain_target = pdbsdf_a0201$alpha_chain_id[i], return_command = F)
+# }
+# 
+# for(i in 1:nrow(pdbsdf_a2402)) {
+#   crnt_pdb <- pdbsdf_a2402$pdb_file_experimental[i]
+#   message(Sys.time(), " - ", i, " - ", crnt_pdb)
+#   pymol.align(pdbpath_ref = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_aligned_260703/", pdb_ref_a2402),
+#               pdbpath_target = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_aligned_260703/", crnt_pdb),
+#               outpath = paste0(outdir, crnt_pdb),
+#               alpha_chain_ref = pdbsdf_a2402$alpha_chain_id[1],
+#               alpha_chain_target = pdbsdf_a2402$alpha_chain_id[i], return_command = F)
+# }
+# 
+# # calculating structural distances ------------
+# simsdf_struct <- combn(pdbsdf$pdb_file_experimental, 2) %>%
+#   t %>%
+#   as.data.frame %>%
+#   set_colnames(c("pdb1", "pdb2")) %>%
+#   mutate(pdbpath1 = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_alignedtoref_260703/", pdb1),
+#          pdbpath2 = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_alignedtoref_260703/", pdb2))
+# 
+# simsdf_struct$pep_chain_id_1 <- pdbsdf$pep_chain_id[match(simsdf_struct$pdb1, pdbsdf$pdb_file_experimental)]
+# simsdf_struct$pep_chain_id_2 <- pdbsdf$pep_chain_id[match(simsdf_struct$pdb2, pdbsdf$pdb_file_experimental)]
+# 
+# plan("multisession", workers = 10)
+# tic()
+# simsdf_struct$rmsd <- future_pmap_dbl(list(simsdf_struct$pdbpath1, simsdf_struct$pdbpath2, simsdf_struct$pep_chain_id_1, simsdf_struct$pep_chain_id_2),
+#                                       \(crnt_pdbpath_1 = ..1, crnt_pdbpath_2 = ..2, crnt_pep_chain_id_1 = ..3, crnt_pep_chain_id_2 = ..4) {
+#                                         quietly(RMSD.pdb)(x = crnt_pdbpath_1,
+#                                                           y = crnt_pdbpath_2,
+#                                                           path_input = T,
+#                                                           fit = F,
+#                                                           elety = "CA",
+#                                                           chain_x = crnt_pep_chain_id_1,
+#                                                           chain_y = crnt_pep_chain_id_2)$result
+#                                       }, .progress = TRUE)
+# toc()
+# 
+# simsdf_struct$pep1 <- pdbsdf$peptide[fmatch(simsdf_struct$pdb1, pdbsdf$pdb_file_experimental)]
+# simsdf_struct$pep2 <- pdbsdf$peptide[fmatch(simsdf_struct$pdb2, pdbsdf$pdb_file_experimental)]
+# simsdf_struct$allele1 <- pdbsdf$allele[fmatch(simsdf_struct$pdb1, pdbsdf$pdb_file_experimental)]
+# simsdf_struct$allele2 <- pdbsdf$allele[fmatch(simsdf_struct$pdb2, pdbsdf$pdb_file_experimental)]
+# 
+# # calculating BLOSUM62 similarities ------------
+# simsdf_struct$blosum62 <- CalcSeqSim.jl(simsdf_struct$pep2, simsdf_struct$pep2, protr::AABLOSUM62)
+# 
+# save(simsdf_struct, file = "data/dataset_preparation_1/simsdf_struct_review_experimental_separated_alignedtoref_260703.RData")
+
+# building a dataset with each pHLA comparison being present only once ----------
+load("data/dataset_preparation_1/simsdf_struct_review_experimental_separated_alignedtoref_260703.RData")
+
+set.seed(1234)
+simsdf_struct %<>%
+  filter(allele1 == allele2) %>%
+  filter(pep1 != pep2) %>% 
+  dplyr::select(pep1, pep2, pdb1, pdb2, allele1, blosum62, rmsd) %>%
+  group_by(pep1, pep2, allele1) %>%
+  group_map(~.x[sample(1:nrow(.x), size = 1), ], .keep = T) %>%
+  do.call(rbind, .)
+
+# counting the number of unique allele-peptide pairs investigated in the analysis----------
+simsdf_struct %>%
+  filter(allele1 == "A0201") %>% 
+  dplyr::select(pep1, pep2) %>% 
+  unlist %>% 
+  unique %>% 
+  length
+
+simsdf_struct %>%
+  filter(allele1 == "A2402") %>% 
+  dplyr::select(pep1, pep2) %>% 
+  unlist %>% 
+  unique %>% 
+  length
+
+# preliminary plots -----------
+simsdf_struct %>% 
+  filter(allele1 == "A0201") %>% 
+  ggscatter(x = "blosum62", y = "rmsd") +
+  geom_smooth(method = "lm") +
+  stat_cor(method = "spearman")
+```
+
+In the next code chunk I will select the two extremities to be shown (high seq similarity, but high structural divergence; low seq similarity, but high structural similarity), and visualize it:
+
+```{r}
+# selecting a peptide with high BLOSUM62 similarity and high structural divergence -----------
+# LAGIGILTV (2GTW_2.pdb) and TLFDEPPPL (8FU4_1.pdb)
+entry_high_rmsd <- simsdf_struct %>% filter(allele1 == "A0201" & rmsd > 3 & blosum62 > 50) %>% filter(rmsd == max(rmsd))
+
+# selecting a peptide with low BLOSUM62 similarity and high structural similarity -----------
+# AAGIGILTV (2GUO_2) and IISAVVGIL (1QR1_1)
+entry_low_rmsd <- simsdf_struct %>% filter(allele1 == "A0201" & rmsd < 1 & blosum62 < 40) %>% arrange(by = rmsd) %>% head(1)
+
+# adding the 3D structures (panels C and D) -----------
+system("pymol fig_blosum_pymol_script.pml") # creating the 3D structure figures
+
+library(magick)
+img_1s8d <- image_read("data/dataset_preparation_1/1S8D_1_and_1EEY_2.png") %>% image_trim() %>% rasterGrob(interpolate = TRUE)
+img_2gtw <- image_read("data/dataset_preparation_1/2GTW_2_and_8FU4_1.png") %>% image_trim() %>% rasterGrob(interpolate = TRUE)
+
+fig_blosum_E <- ggplot() +
+  annotation_custom(img_2gtw, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  theme_void() +
+  theme(plot.margin = margin(0,0,0,0))
+fig_blosum_F <- ggplot() +
+  annotation_custom(img_1s8d, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  theme_void() +
+  theme(plot.margin = margin(0,0,0,0))
+
+fig_structs_ready <- cowplot::plot_grid(fig_blosum_E, NULL, fig_blosum_F, nrow = 1, labels = c("E", "", "F"), rel_widths = c(1, 0.1, 1))
+```
+
+Creating the scatter plots:
+```{r}
+# exploring correlations -----------
+simsdf_struct %>% arrange(by = rmsd) %>% tail
+
+spearman_results_a0201 <- simsdf_struct %>%
+  filter(allele1 == "A0201") %>%
+  (\(x) {Hmisc::rcorr(x$blosum62, x$rmsd, type = "spearman") %>% ExtractCorrResults(string_output = F)})
+
+spearman_results_a2402 <- simsdf_struct %>%
+  filter(allele1 == "A2402") %>%
+  (\(x) {Hmisc::rcorr(x$blosum62, x$rmsd, type = "spearman") %>% ExtractCorrResults(string_output = F)})
+
+lbl_a0201 <- paste0("atop(ρ == ", spearman_results_a0201["r"] %>% round(3),
+                    ", ",
+                    "P == ", spearman_results_a0201["P"] %>% expSup(w = .), ")")
+
+lbl_a2402 <- paste0("atop(ρ == ", spearman_results_a2402["r"] %>% round(3),
+                    ", ",
+                    "P == ", spearman_results_a2402["P"] %>% expSup(w = .), ")")
+
+simsdf_struct %<>% 
+  mutate(special_rmsd_entry = case_when(pep1 == entry_high_rmsd$pep1 & pep2 == entry_high_rmsd$pep2  ~ "high",
+                                        pep1 == entry_low_rmsd$pep1 & pep2 == entry_low_rmsd$pep2  ~ "low"))
+
+# scatterplots:
+(plt_scatter_bl62 <- cowplot::plot_grid(simsdf_struct %>% 
+                                          filter(allele1 == "A0201") %>%
+                                          ggscatter(x = "blosum62", y = "rmsd", alpha = 0.05) +
+                                          geom_smooth(method = "lm") +
+                                          geom_point(data = entry_high_rmsd, aes(x = blosum62, y = rmsd), color = scales::muted("red"), size = 4) +
+                                          geom_point(data = entry_low_rmsd, aes(x = blosum62, y = rmsd), color = scales::muted("blue"), size = 4) +
+                                          annotate("text", x = 65, y = 3.5, label = lbl_a0201, parse = TRUE, hjust = 1) +
+                                          xlab("BLOSUM62 similarity") + ylab(expression(RMSD[Cα]~(Å))) +
+                                          ylim(c(0, 4)) +
+                                          ggtitle(label = paste0("HLA-A*02:01")) +
+                                          theme_classic(),
+                                        simsdf_struct %>% 
+                                          filter(allele1 == "A2402") %>% 
+                                          ggscatter(x = "blosum62", y = "rmsd", alpha = 0.05) + 
+                                          geom_smooth(method = "lm") +
+                                          annotate("text", x = 65, y = 3.5, label = lbl_a2402, parse = TRUE, hjust = 1) +
+                                          xlab("BLOSUM62 similarity") + ylab(expression(RMSD[Cα]~(Å))) +
+                                          ylim(c(0, 4)) +
+                                          ggtitle(label = paste0("HLA-A*24:02")) +
+                                          theme_classic(),
+                                        labels = c("A", "B")))
+
+# checking the number of combinations
+simsdf_struct %>% filter(allele1 == "A0201") %>% unique %>% nrow
+simsdf_struct %>% filter(allele1 == "A2402") %>% unique %>% nrow
+```
+
+## Backbone heavy atom RMSD
+Repeating the correlation analyses with backbone heavy atom RMSD:
+```{r}
+# # creating PDB pairs ----------
+# pdbsdf <- loadIn("data/dataset_preparation_1/pdbsdf_experimental_and_predicted_mhcfine_260703.RData")[[1]]
+# pdbsdf %<>% filter(allele %in% c("A0201", "A2402")) # eliminating C0401 as it had only a single experimental structure
+# 
+# # selecting a common reference pHLA for A0201 to align everything else to -----------
+# outdir = "data/dataset_preparation_1/pdb_files_experimental_separated_alignedtoref_260703/"
+# dir.create(outdir)
+# pdbsdf_a0201 <- pdbsdf %>% filter(allele == "A0201")
+# pdbsdf_a2402 <- pdbsdf %>% filter(allele == "A2402")
+# 
+# # calculating structural distances ------------
+# simsdf_struct <- combn(pdbsdf$pdb_file_experimental, 2) %>%
+#   t %>%
+#   as.data.frame %>%
+#   set_colnames(c("pdb1", "pdb2")) %>%
+#   mutate(pdbpath1 = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_alignedtoref_260703/", pdb1),
+#          pdbpath2 = paste0("data/dataset_preparation_1/pdb_files_experimental_separated_alignedtoref_260703/", pdb2))
+# 
+# simsdf_struct$pep_chain_id_1 <- pdbsdf$pep_chain_id[match(simsdf_struct$pdb1, pdbsdf$pdb_file_experimental)]
+# simsdf_struct$pep_chain_id_2 <- pdbsdf$pep_chain_id[match(simsdf_struct$pdb2, pdbsdf$pdb_file_experimental)]
+# 
+# plan("multisession", workers = 10)
+# tic()
+# simsdf_struct$rmsd <- future_pmap_dbl(list(simsdf_struct$pdbpath1, simsdf_struct$pdbpath2, simsdf_struct$pep_chain_id_1, simsdf_struct$pep_chain_id_2),
+#                                       \(crnt_pdbpath_1 = ..1, crnt_pdbpath_2 = ..2, crnt_pep_chain_id_1 = ..3, crnt_pep_chain_id_2 = ..4) {
+#                                         quietly(RMSD.pdb)(x = crnt_pdbpath_1,
+#                                                           y = crnt_pdbpath_2,
+#                                                           path_input = T,
+#                                                           fit = F,
+#                                                           elety = c("N", "CA", "C", "O"),
+#                                                           chain_x = crnt_pep_chain_id_1,
+#                                                           chain_y = crnt_pep_chain_id_2)$result
+#                                       }, .progress = TRUE)
+# toc()
+# 
+# simsdf_struct$pep1 <- pdbsdf$peptide[fmatch(simsdf_struct$pdb1, pdbsdf$pdb_file_experimental)]
+# simsdf_struct$pep2 <- pdbsdf$peptide[fmatch(simsdf_struct$pdb2, pdbsdf$pdb_file_experimental)]
+# simsdf_struct$allele1 <- pdbsdf$allele[fmatch(simsdf_struct$pdb1, pdbsdf$pdb_file_experimental)]
+# simsdf_struct$allele2 <- pdbsdf$allele[fmatch(simsdf_struct$pdb2, pdbsdf$pdb_file_experimental)]
+# 
+# # calculating BLOSUM62 similarities ------------
+# simsdf_struct$blosum62 <- CalcSeqSim.jl(simsdf_struct$pep2, simsdf_struct$pep2, protr::AABLOSUM62)
+# 
+# save(simsdf_struct, file = "data/dataset_preparation_1/simsdf_struct_review_experimental_separated_alignedtoref_heavybackbone_260703.RData")
+
+# building a dataset with each pHLA comparison being present only once ----------
+load("data/dataset_preparation_1/simsdf_struct_review_experimental_separated_alignedtoref_heavybackbone_260703.RData")
+
+set.seed(1234)
+simsdf_struct %<>%
+  filter(allele1 == allele2) %>%
+  filter(pep1 != pep2) %>% 
+  dplyr::select(pep1, pep2, pdb1, pdb2, allele1, blosum62, rmsd) %>%
+  group_by(pep1, pep2, allele1) %>%
+  group_map(~.x[sample(1:nrow(.x), size = 1), ], .keep = T) %>%
+  do.call(rbind, .)
+
+# exploring correlations -----------
+simsdf_struct %>% arrange(by = rmsd) %>% tail
+
+spearman_results_a0201 <- simsdf_struct %>%
+  filter(allele1 == "A0201") %>%
+  (\(x) {Hmisc::rcorr(x$blosum62, x$rmsd, type = "spearman") %>% ExtractCorrResults(string_output = F)})
+
+spearman_results_a2402 <- simsdf_struct %>%
+  filter(allele1 == "A2402") %>%
+  (\(x) {Hmisc::rcorr(x$blosum62, x$rmsd, type = "spearman") %>% ExtractCorrResults(string_output = F)})
+
+lbl_a0201 <- paste0("atop(ρ == ", spearman_results_a0201["r"] %>% round(3),
+                    ", ",
+                    PrettyPvalues(spearman_results_a0201["P"]), ")")
+
+lbl_a2402 <- paste0("atop(ρ == ", spearman_results_a2402["r"] %>% round(3),
+                    ", ",
+                    PrettyPvalues(spearman_results_a2402["P"]), ")")
+
+# scatterplots:
+plt_scatter_bl62_heavyatom <- cowplot::plot_grid(simsdf_struct %>% 
+                                                   filter(allele1 == "A0201") %>% 
+                                                   ggscatter(x = "blosum62", y = "rmsd", alpha = 0.05) +
+                                                   geom_smooth(method = "lm") +
+                                                   annotate("text", x = 65, y = 8, label = lbl_a0201, parse = TRUE, hjust = 1) +
+                                                   xlab("BLOSUM62 similarity") + ylab(expression(RMSD[bb-heavy]~(Å))) +
+                                                   ylim(c(0, 9)) +
+                                                   ggtitle(label = paste0("HLA-A*02:01")) +
+                                                   theme_classic(),
+                                                 simsdf_struct %>% 
+                                                   filter(allele1 == "A2402") %>% 
+                                                   ggscatter(x = "blosum62", y = "rmsd", alpha = 0.05) + 
+                                                   geom_smooth(method = "lm") +
+                                                   annotate("text", x = 65, y = 8, label = lbl_a2402, parse = TRUE, hjust = 1) +
+                                                   xlab("BLOSUM62 similarity") + ylab(expression(RMSD[bb-heavy]~(Å))) +
+                                                   ylim(c(0, 9)) +
+                                                   ggtitle(label = paste0("HLA-A*24:02")) +
+                                                   theme_classic(),
+                                                 labels = c("C", "D"))
+```
+
+## Assembling the final plot
+```{r}
+png("data/dataset_preparation_1/fig_scatter_bl62_all.png", width = 159.2, height = 210, units = "mm", res = 300)
+cowplot::plot_grid(plt_scatter_bl62, plt_scatter_bl62_heavyatom, fig_structs_ready, ncol = 1)
+dev.off()
+```
+
+# ANALYSIS! Testing the reproducibility of MHC-fine by predicting the same structures in multiple iterations
+In this round, I re-performed the same structural predictions many times to see if the output structures remain the same. For this, I used 5-5 randomly chosen pHLA complexes associated with each HLA alleles, and ran the predictions for each selected pHLA complex 10 times. Note, for C0401, there was only a single structure in the PDBdb, I will work with that. 
+
+Predictions started at 10.33 6th July, 2026 @ PULI. Expected to last for ~55 minutes.
+
+Preparing the predictions:
+
+```{r}
+# loading data -----------
+load("data/dataset_preparation_1/pepsdf_experimental_260703.RData")
+load("data/dataset_preparation_1/protein_components_experimental_260703.RData")
+pepsdf %<>%
+  filter(pdbid %in% names(protein_components)) %>% 
+  filter(nchar(peptide) == 9)
+
+# chosing 5-5 random structures per alleles (for C0401, only one, as that's the only one) -----------
+set.seed(1234)
+pepsdf %<>% 
+  group_by(allele) %>% 
+  group_map(~.x[sample(1:nrow(.x), size = 5, replace = TRUE), ] %>% unique, .keep = T) %>%
+  do.call(rbind, .)
+
+# collecting HLA sequences ------------
+# I will try to find the homologous sequences that were used in A0201-focused predictions
+A0201_seq = "GSHSMRYFFTSVSRPGRGEPRFIAVGYVDDTQFVRFDSDAASQRMEPRAPWIEQEGPEYWDGETRKVKAHSQTHRVDLGTLRGYYNQSEAGSHTVQRMYGCDVGSDWRFLRGYHQYAYDGKDYIALKEDLRSWTAADMAAQTTKHKWEAAHVAEQLRAYLEGTCVEWLRRYLENGKETLQRT" %>% Biostrings::AAStringSet() # from the script attached to the MHC-Fine publication
+
+hlaI_protseqs <- c(Biostrings::readAAStringSet("data/HLA_prot/A_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/B_prot.fasta"),
+                   Biostrings::readAAStringSet("data/HLA_prot/C_prot.fasta"))
+
+names(hlaI_protseqs) %<>% strsplit(" ") %>% map_chr(~.x[2])
+alleles_unq <- pepsdf$allele %>% unique %>% sort %>% gsub("HLA-", "", .)
+hlaI_protseq_names_short <- names(hlaI_protseqs) %>% strsplit("\\:") %>% map_chr(~.x[1:2] %>% paste0(collapse = ":"))
+hlaI_protseqs <- hlaI_protseqs[fmatch(alleles_unq, hlaI_protseq_names_short)]
+names(hlaI_protseqs) <- alleles_unq
+
+hla_seqs <- map(hlaI_protseqs, \(crnt_seq) {
+  algnmnt <- pwalign::pairwiseAlignment(A0201_seq, crnt_seq)
+  algnmntdf <- data.frame(A0201 = algnmnt@pattern %>% as.character() %>% strsplit("") %>% unlist(use.names = F),
+                          other_allele = algnmnt@subject %>% as.character() %>% strsplit("") %>% unlist(use.names = F))
+  
+  # extracting the longest stretch of matching sequence (with no dashes)
+  rleobj <- rle(algnmntdf$A0201 != "-")
+  rledf <- data.frame(lngths = rleobj$lengths, aa_lgl = rleobj$values)
+  rledf$end_pos <- cumsum(rledf$lngths)
+  rledf$start_pos <- rledf$end_pos - rledf$lngths + 1
+  rledf$end_pos <- rledf$start_pos + rledf$lngths - 1
+  
+  start_pos_maxlngth <- rledf$start_pos[which.max(rledf$lngths)]
+  end_pos_maxlngth <- rledf$end_pos[which.max(rledf$lngths)]
+  
+  algnmntdf <- algnmntdf[start_pos_maxlngth:end_pos_maxlngth, ]
+  
+  other_allele_seq <- algnmntdf$other_allele %>% paste0(collapse = "")
+  
+  return(other_allele_seq)
+}, .progress = TRUE)
+
+hla_seqs %<>% unlist(use.names = F) %>% set_names(names(hlaI_protseqs))
+hla_seqs %>% nchar %>% hist() # sequence lengths are between 176 and 182, great!
+names(hla_seqs) %<>% gsub("\\*", "", .) %>% gsub("\\:", "", .)
+
+# creating the MHC-Fine input ----------
+pepsdf %<>% 
+  mutate(allele_short = allele %>% gsub("HLA-", "", .) %>% gsub("\\*", "", .) %>% gsub("\\:", "", .), .after = allele)
+pepsdf <- map(1:10, ~pepsdf %>% mutate(iter = .x, .before = 1)) %>% do.call(rbind, .)
+
+inputdf <- data.frame(unique_id = paste0(pepsdf$allele_short, ".", pepsdf$peptide, ".", sprintf("%02d", pepsdf$iter)),
+                      protein_sequence = hla_seqs[pepsdf$allele_short] %>% unlist(use.names = FALSE),
+                      peptide_sequence = pepsdf$peptide)
+
+save(pepsdf, file = "data/dataset_preparation_1/pepsdf_input_pdbdb_rand5_iter10_consistency_check.RData")
+
+write.csv(inputdf, file = "data/dataset_preparation_1/mhcfine_input_pdbdb_rand5_iter10_consistency_check.csv",
+          quote = FALSE, row.names = FALSE)
+```
+
+Analyzing the outputs:
+
+```{r}
+inputdf <- read.csv("data/dataset_preparation_1/mhcfine_input_pdbdb_rand5_iter10_consistency_check.csv")
+inputdf$unique_id %>%
+  strsplit("\\.") %>%
+  map_chr(~c(.x[-3], "pdb") %>% paste0(collapse = ".")) %>% 
+  unique %>% 
+  paste0(collapse = ", ")
+
+
+load("data/dataset_preparation_1/pepsdf_input_pdbdb_rand5_iter10_consistency_check.RData")
+pepsdf %<>% 
+  mutate(file_path = paste0("data/dataset_preparation_1/mhcfine_output_pdbdb_rand5_iter10_consistency_check/",
+                            allele_short, ".", peptide, ".", sprintf("%02d", iter), ".pdb"))
+
+pdbtexts_list <- pepsdf %>% 
+  group_by(allele_short, peptide) %>% 
+  group_map(~.x$file_path %>% map(\(crnt_path) readLines(crnt_path)))
+
+map_dbl(pdbtexts_list, ~.x %>% length)
+map_dbl(pdbtexts_list, ~.x %>% unique %>% length) # HURRÁ!
+```
+
+All PDB files coming from the same inputs are identical!
