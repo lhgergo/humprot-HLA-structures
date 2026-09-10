@@ -190,7 +190,7 @@ Assembling the final plot:
 ```{r}
 png("data/dataset_preparation_1/fig2.png", width = 159.2, height = 200, units = "mm", res = 300)
 cowplot::plot_grid(cowplot::plot_grid(plotlist = pltslist_hist, ncol = 1),
-                   cowplot::plot_grid(plotlist = plts_motif, ncol = 1), nrow = 1, labels = c("A", "B"), rel_widths = c(0.6, 0.4))
+                   cowplot::plot_grid(plotlist = plts_motif, ncol = 1), nrow = 1, labels = c("a", "b"), rel_widths = c(0.6, 0.4))
 dev.off()
 ```
 
@@ -449,7 +449,7 @@ plt_median <- plddtdf_aggr %>%
   theme_classic()
   
 plt_ready_bplot <- cowplot::plot_grid(plt_overall, plt_mean, plt_median,
-                                     nrow = 1, labels = c("A", "B", "C"))
+                                     nrow = 1, labels = c("a", "b", "c"))
 
 png("data/dataset_preparation_1/fig_bplot_plddt.png", width = 159.2, height = 140, units = "mm", res = 300)
 plt_ready_bplot
@@ -1761,8 +1761,6 @@ pdbsdf %>%
   mean
 ```
 
-Situation is similar: MHC-Fine and AlphaFold3 are in a similar range, APE-Gen seems to be weaker.
-
 ## All heavy atom RMSD
 Here, I created a custom version of the RMSD.pdb function, as there are mismatches between the atoms found in the predicted structures vs. the in vitro one. To tackle this problem, I create a unique identifier for each atom (ids_x and ids_y variables inside the function) that can be used for matching each component of each amino acid. Consequently, the all-heavy-atom RMSD calculations could be performed.
 
@@ -2030,7 +2028,8 @@ pdbsdf %>%
 png("data/dataset_preparation_1/fig_threeway_benchmark_all.png", width = 159.2, height = 100, units = "mm", res = 300)
 cowplot::plot_grid(plt_threeway_benchmark + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
                    plt_threeway_benchmark_heavybackbone + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
-                   plt_threeway_benchmark_allheavyatom + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)), nrow = 1, labels = c("A", "B", "C"))
+                   plt_threeway_benchmark_allheavyatom + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+                   nrow = 1, labels = c("a", "b", "c"))
 dev.off()
 
 # MHC-Fine test set table ----------
@@ -2060,8 +2059,7 @@ write.csv(pdbsdf_all, file = "data/dataset_preparation_1/pdbsdf_experimental_and
 
 # ANALYSIS! Creating the 3D structures for best and worst predicted structures
 ```{r}
-# system("pymol fig_3dstructures_pymol_script_a0201.pml") # creating the 3D structure figures
-# system("pymol fig_3dstructures_pymol_script_a2402.pml") # creating the 3D structure figures
+# system("pymol fig_3dstructurs_pymol_script.pml") # creating the 3D structure figures
 
 library(magick)
 img_a2402_worst <- image_read("data/dataset_preparation_1/7JYW_1_TYQWIIRNW.png") %>% image_trim() %>% rasterGrob(interpolate = TRUE) # A2402, worst
@@ -2093,7 +2091,7 @@ plt_ready <- ggdraw() +
   draw_plot(fig3d_B, x = .5, y = 0, width = 0.5, height = 0.48) +
   draw_plot(fig3d_C, x = 0, y = .5, width = 0.5, height = 0.48) +
   draw_plot(fig3d_D, x = .5, y = .5, width = 0.5, height = 0.48) +
-  draw_plot_label(label = c("A", "B", "C", "D"), size = 15,
+  draw_plot_label(label = c("a", "b", "c", "d"), size = 15,
                   x = c(0, 0.5, 0, 0.5),
                   y = c(1, 1, 0.5, 0.5))
 
@@ -2235,7 +2233,7 @@ fig_blosum_F <- ggplot() +
   theme_void() +
   theme(plot.margin = margin(0,0,0,0))
 
-fig_structs_ready <- cowplot::plot_grid(fig_blosum_E, NULL, fig_blosum_F, nrow = 1, labels = c("E", "", "F"), rel_widths = c(1, 0.1, 1))
+fig_structs_ready <- cowplot::plot_grid(fig_blosum_E, NULL, fig_blosum_F, nrow = 1, labels = c("e", "", "f"), rel_widths = c(1, 0.1, 1))
 ```
 
 Creating the scatter plots:
@@ -2284,7 +2282,7 @@ simsdf_struct %<>%
                                           ylim(c(0, 4)) +
                                           ggtitle(label = paste0("HLA-A*24:02")) +
                                           theme_classic(),
-                                        labels = c("A", "B")))
+                                        labels = c("a", "b")))
 
 # checking the number of combinations
 simsdf_struct %>% filter(allele1 == "A0201") %>% unique %>% nrow
@@ -2389,7 +2387,7 @@ plt_scatter_bl62_heavyatom <- cowplot::plot_grid(simsdf_struct %>%
                                                    ylim(c(0, 9)) +
                                                    ggtitle(label = paste0("HLA-A*24:02")) +
                                                    theme_classic(),
-                                                 labels = c("C", "D"))
+                                                 labels = c("c", "d"))
 ```
 
 ## Assembling the final plot
